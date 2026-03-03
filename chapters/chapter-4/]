@@ -1,0 +1,153 @@
+#![allow(unused_imports)]
+
+use async_channel::{Receiver, Sender, bounded};
+use smol::io::{AsyncRead, AsyncReadExt};
+use thiserror::Error;
+
+pub trait TReader: AsyncRead + Unpin + Send + 'static {}
+impl<T> TReader for T where T: AsyncRead + Unpin + Send + 'static {}
+
+#[derive(Debug)]
+pub struct Request {
+    request_line: RequestLine,
+}
+
+#[derive(Debug)]
+pub struct RequestLine {
+    http_version: String,
+    request_target: String,
+    method: String,
+}
+
+#[derive(Debug, Error)]
+pub enum RequestError {
+    #[error("Invalid line ending")]
+    InvalidLineEnding,
+}
+
+#[derive(Debug)]
+pub enum RequestParserState {
+    RequestLine,
+    Headers,
+    Body,
+    Done,
+}
+
+#[derive(Debug)]
+pub struct RequestParser {
+    state: RequestParserState,
+    tx: Sender<Vec<u8>>,
+    rx: Receiver<Vec<u8>>,
+}
+
+impl RequestParser {
+    pub fn new() -> Self {
+        let (tx, rx) = bounded::<Vec<u8>>(32);
+
+        Self {
+            state: RequestParserState::RequestLine,
+            tx,
+            rx,
+        }
+    }
+
+    pub fn read_lines_stream(self, mut reader: impl TReader) -> anyhow::Result<Receiver<Vec<u8>>> {
+        smol::spawn(async move {
+            let mut buffer = [0u8; 8];
+            let mut line = vec![];
+
+            loop {
+                match reader.read(&mut buffer).await {
+                    Ok(0) if line.is_empty() => break,
+                    Ok(0) => {
+                        self.tx.send(line).await?;
+                        break;
+                    }
+                    Ok(n) => {
+                        for &byte in &buffer[..n] {
+                            if byte == b'\n' {
+                                self.tx.send(std::mem::take(&mut line)).await?;
+                            } else {
+                                line.push(byte);
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .detach();
+
+        Ok(self.rx)
+    }
+
+    pub async fn parse(mut self, mut reader: impl TReader) -> anyhow::Result<Request> {
+        let rx = self.read_lines_stream(reader)?;
+        let mut request_line: RequestLine;
+
+        while let Ok(line) = rx.recv().await {
+            if line[line.len() - 1] != b'\r' {
+                return Err(RequestError::InvalidLineEnding)?;
+            }
+        }
+        todo!();
+    }
+}
+
+fn parse_request_line(line: &[u8]) -> anyhow::Result<RequestLine> {
+    todo!();
+}
+
+pub async fn request_from_reader(reader: impl TReader) -> anyhow::Result<Request> {
+    todo!()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smol::io::Cursor;
+
+    #[test]
+    fn test_good_get_request_line() {
+        smol::block_on(async move {
+            let data = b"GET / HTTP/1.1\r\nHost: localhost:42069\r\nUser-Agent: curl/7.81.0\r\nAccept: */*\r\n\r\n";
+            let cursor = Cursor::new(data);
+
+            let r = request_from_reader(cursor).await;
+            assert!(r.is_ok());
+
+            let r = r.unwrap();
+            assert_eq!(r.request_line.method, "GET");
+            assert_eq!(r.request_line.request_target, "/");
+            assert_eq!(r.request_line.http_version, "1.1");
+        })
+    }
+
+    #[test]
+    fn test_good_get_request_line_with_path() {
+        smol::block_on(async move {
+            let data = b"GET /coffee HTTP/1.1\r\nHost: localhost:42069\r\nUser-Agent: curl/7.81.0\r\nAccept: */*\r\n\r\n";
+            let cursor = Cursor::new(data);
+
+            let r = request_from_reader(cursor).await;
+            assert!(r.is_ok());
+
+            let r = r.unwrap();
+            assert_eq!(r.request_line.method, "GET");
+            assert_eq!(r.request_line.request_target, "/path/to/resource");
+            assert_eq!(r.request_line.http_version, "1.0");
+        })
+    }
+
+    #[test]
+    fn test_invalid_number_of_parts() {
+        smol::block_on(async move {
+            let data = b"/coffee HTTP/1.1\r\nHost: localhost:42069\r\nUser-Agent: curl/7.81.0\r\nAccept: */*\r\n\r\n";
+            let cursor = Cursor::new(data);
+
+            let r = request_from_reader(cursor).await;
+            assert!(r.is_err());
+        })
+    }
+}

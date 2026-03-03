@@ -1,0 +1,12 @@
+[workspace]
+resolver = "3"
+members = ["chapters/*"]
+
+[workspace.package]
+edition = "2024"
+
+[workspace.dependencies]
+anyhow = "1.0.102"
+async-channel = "2.5.0"
+smol = "2.0.2"
+thiserror = "2.0.18"
