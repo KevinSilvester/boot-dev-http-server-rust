@@ -8,3 +8,6 @@ anyhow = { workspace = true }
 async-channel = { workspace = true }
 smol = { workspace = true }
 thiserror = { workspace = true }
+bytes = { workspace = true }
+memchr = { workspace = true }
+
