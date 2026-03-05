@@ -2,7 +2,7 @@ use anyhow::Context;
 use bytes::BytesMut;
 use thiserror::Error;
 
-use super::{HttpVersion, RequestLine, RequestMethod};
+use super::line::{HttpVersion, RequestLine, RequestMethod};
 
 /// ref: https://community.cloudflare.com/t/maximum-on-http-header-values/424067/3
 const MAX_REQUEST_LINE_SIZE: usize = 8 << 10;
@@ -100,7 +100,7 @@ impl RequestParser {
         let request_target = BytesMut::from(request_target);
 
         let version = match version {
-            b"HTTP/1.1" => HttpVersion::Http11,
+            b"HTTP/1.1" => HttpVersion::HTTP1_1,
             _ => return Err(RequestParserError::UnsupportedHttpVersion)?,
         };
 
@@ -158,5 +158,101 @@ impl RequestParser {
         }
 
         Ok(read)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_request_line_good() {
+        let data = b"GET / HTTP/1.1\r\nHost: localhost:42069\r\nUser-Agent: curl/7.81.0\r\nAccept: */*\r\n\r\n";
+
+        let mut req_parser = RequestParser::new(1024);
+        let _ = match req_parser.parse(data) {
+            Ok(n) => n,
+            Err(e) => panic!("Error parsing request: {e}"),
+        };
+
+        let request_line = match req_parser.request_line {
+            Some(ref rl) => rl,
+            None => panic!("Request line should be parsed!"),
+        };
+
+        assert!(matches!(request_line.method, RequestMethod::GET));
+        assert_eq!(&request_line.request_target[..], b"/");
+        assert!(matches!(request_line.http_version, HttpVersion::HTTP1_1));
+    }
+
+    #[test]
+    fn test_parse_request_line_good_with_path() {
+        let data = b"POST /path/to/resource HTTP/1.1\r\nHost: localhost:42069\r\nUser-Agent: curl/8.16.0\r\nAccept: */*\r\n\r\n";
+        let mut req_parser = RequestParser::new(1024);
+        let _ = match req_parser.parse(data) {
+            Ok(n) => n,
+            Err(e) => panic!("Error parsing request: {e}"),
+        };
+        let request_line = match req_parser.request_line {
+            Some(ref rl) => rl,
+            None => panic!("Request line should be parsed!"),
+        };
+        assert!(matches!(request_line.method, RequestMethod::POST));
+        assert_eq!(&request_line.request_target[..], b"/path/to/resource");
+        assert!(matches!(request_line.http_version, HttpVersion::HTTP1_1));
+    }
+
+    #[test]
+    fn test_parse_request_line_invalid_method() {
+        let data = b"FOO / HTTP/1.1\r\nHost: localhost:42069\r\nUser-Agent: curl/7.81.0\r\nAccept: */*\r\n\r\n";
+        let mut req_parser = RequestParser::new(1024);
+        let r = req_parser.parse(data);
+        assert!(r.is_err());
+        assert!(matches!(
+            r.err().unwrap().downcast_ref::<RequestParserError>(),
+            Some(RequestParserError::InvalidRequestMethod)
+        ));
+    }
+
+    #[test]
+    fn test_parse_request_line_invalid_version() {
+        let data = b"GET / HTTP/2.0\r\nHost: localhost:42069\r\nUser-Agent: curl/7.81.0\r\nAccept: */*\r\n\r\n";
+        let mut req_parser = RequestParser::new(1024);
+        let r = req_parser.parse(data);
+        assert!(r.is_err());
+        assert!(matches!(
+            r.err().unwrap().downcast_ref::<RequestParserError>(),
+            Some(RequestParserError::UnsupportedHttpVersion)
+        ));
+    }
+
+    #[test]
+    fn test_parse_request_line_invalid_number_of_parts() {
+        let data = b"GET / HTTP/1.1 extra\r\nHost: localhost:42069\r\nUser-Agent: curl/7.81.0\r\nAccept: */*\r\n\r\n";
+        let mut req_parser = RequestParser::new(1024);
+        let r = req_parser.parse(data);
+        assert!(r.is_err());
+        assert!(matches!(
+            r.err().unwrap().downcast_ref::<RequestParserError>(),
+            Some(RequestParserError::MalformedRequestLine)
+        ));
+    }
+
+    #[test]
+    fn test_parse_request_line_too_long() {
+        let long_request_target = vec![b'a'; MAX_REQUEST_LINE_SIZE + 1];
+        let data = [
+            &b"GET / "[..],
+            &long_request_target[..],
+            b" HTTP/1.1\r\nHost: localhost:42069\r\nUser-Agent: curl/7.81.0\r\nAccept: */*\r\n\r\n",
+        ]
+        .concat();
+        let mut req_parser = RequestParser::new(1024);
+        let r = req_parser.parse(&data);
+        assert!(r.is_err());
+        assert!(matches!(
+            r.err().unwrap().downcast_ref::<RequestParserError>(),
+            Some(RequestParserError::RequestLineTooLong)
+        ));
     }
 }

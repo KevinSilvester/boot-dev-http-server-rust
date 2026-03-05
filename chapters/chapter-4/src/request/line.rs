@@ -1,7 +1,7 @@
-use bytes::Bytes;
+use bytes::BytesMut;
 
 #[derive(Debug)]
-pub enum Method {
+pub enum RequestMethod {
     GET,
     POST,
     PUT,
@@ -12,14 +12,13 @@ pub enum Method {
 }
 
 #[derive(Debug)]
-pub enum Version {
+pub enum HttpVersion {
     HTTP1_1,
 }
 
 #[derive(Debug)]
-pub struct Line {
-    method: Method,
-    version: Version,
-    target: Bytes,
+pub struct RequestLine {
+    pub method: RequestMethod,
+    pub request_target: BytesMut,
+    pub http_version: HttpVersion,
 }
-

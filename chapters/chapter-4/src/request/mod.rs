@@ -11,37 +11,10 @@ use smol::io::AsyncReadExt;
 use smol::lock::Mutex;
 use smol::net::TcpStream;
 
-pub use self::line::{Line /* Method, Version */};
 pub use self::builder::{RequestParserState, RequestParserError, RequestParser};
 
 #[derive(Debug)]
-pub enum RequestMethod {
-    GET,
-    POST,
-    PUT,
-    DELETE,
-    HEAD,
-    OPTIONS,
-    PATCH,
-}
-
-#[derive(Debug)]
-pub enum HttpVersion {
-    Http11,
-}
-
-#[derive(Debug)]
-pub struct RequestLine {
-    pub method: RequestMethod,
-    pub request_target: BytesMut,
-    pub http_version: HttpVersion,
-}
-
-#[derive(Debug)]
 pub struct Request {
-    bytes: BytesMut,
-    pub peer_address: SocketAddr,
-    pub request_line: Line,
 }
 
 // TODO: add request timeouts
