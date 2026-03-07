@@ -10,4 +10,6 @@ smol = { workspace = true }
 thiserror = { workspace = true }
 bytes = { workspace = true }
 memchr = { workspace = true }
-
+smallvec = { workspace = true }
+gxhash = { workspace = true }
+http = { workspace = true }

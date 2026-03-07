@@ -166,7 +166,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_request_line_good() {
+    fn parse_request_line_good() {
         let data = b"GET / HTTP/1.1\r\nHost: localhost:42069\r\nUser-Agent: curl/7.81.0\r\nAccept: */*\r\n\r\n";
 
         let mut req_parser = RequestParser::new(1024);
@@ -186,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_request_line_good_with_path() {
+    fn parse_request_line_good_with_path() {
         let data = b"POST /path/to/resource HTTP/1.1\r\nHost: localhost:42069\r\nUser-Agent: curl/8.16.0\r\nAccept: */*\r\n\r\n";
         let mut req_parser = RequestParser::new(1024);
         let _ = match req_parser.parse(data) {
@@ -203,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_request_line_invalid_method() {
+    fn parse_request_line_invalid_method() {
         let data = b"FOO / HTTP/1.1\r\nHost: localhost:42069\r\nUser-Agent: curl/7.81.0\r\nAccept: */*\r\n\r\n";
         let mut req_parser = RequestParser::new(1024);
         let r = req_parser.parse(data);
@@ -215,7 +215,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_request_line_invalid_version() {
+    fn parse_request_line_invalid_version() {
         let data = b"GET / HTTP/2.0\r\nHost: localhost:42069\r\nUser-Agent: curl/7.81.0\r\nAccept: */*\r\n\r\n";
         let mut req_parser = RequestParser::new(1024);
         let r = req_parser.parse(data);
@@ -227,7 +227,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_request_line_invalid_number_of_parts() {
+    fn parse_request_line_invalid_number_of_parts() {
         let data = b"GET / HTTP/1.1 extra\r\nHost: localhost:42069\r\nUser-Agent: curl/7.81.0\r\nAccept: */*\r\n\r\n";
         let mut req_parser = RequestParser::new(1024);
         let r = req_parser.parse(data);
@@ -239,7 +239,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_request_line_too_long() {
+    fn parse_request_line_too_long() {
         let long_request_target = vec![b'a'; MAX_REQUEST_LINE_SIZE + 1];
         let data = [
             &b"GET / "[..],

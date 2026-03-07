@@ -1,5 +1,6 @@
 mod config;
 mod connection;
+mod header;
 mod readers;
 mod request;
 
