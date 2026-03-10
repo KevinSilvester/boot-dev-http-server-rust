@@ -6,16 +6,20 @@
 //! <https://github.com/actix/actix-web/blob/main/actix-http/src/header/map.rs>
 //!
 //! HTTP 1.1 spec allow the same header to have multiple values in the same request
+//! or response, and the values can be either in the same line separated by commas or in multiple
+//! lines with the same header name.
 //! e.g.
 //! ```http
-//! Accept: text/html
-//! Accept: application/json
+//! Field1: value1
+//! Field1: value2
+//! Field2: value3, value4
+//! Field2: value5
 //! ```
 
 use std::collections::hash_map::Entry;
 
+use arrayvec::ArrayVec;
 use gxhash::HashMap;
-use smallvec::{SmallVec, smallvec};
 
 use super::*;
 
@@ -102,14 +106,14 @@ pub struct HeaderMap {
 
 #[derive(Debug, Clone, Default)]
 pub struct Value {
-    inner: SmallVec<[HeaderValue; MAP_VALUES_PER_HEADER]>,
+    inner: ArrayVec<HeaderValue, MAP_VALUES_PER_HEADER>,
 }
 
 impl Value {
     pub fn one(val: HeaderValue) -> Self {
-        Self {
-            inner: smallvec![val],
-        }
+        let mut inner = ArrayVec::new();
+        inner.push(val);
+        Self { inner }
     }
 
     pub fn len(&self) -> usize {

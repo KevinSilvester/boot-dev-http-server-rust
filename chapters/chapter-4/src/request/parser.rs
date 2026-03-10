@@ -70,36 +70,47 @@ impl RequestParser {
     }
 
     pub fn parse_request_line(line: &[u8]) -> anyhow::Result<RequestLine> {
-        let mut parts = line.split(|b| *b == b' ');
+        let mut spaces = memchr::memchr_iter(b' ', line);
+        let sp_one = spaces.next().context(RequestParserError::MalformedRequestLine)?;
+        let sp_two = spaces.next().context(RequestParserError::MalformedRequestLine)?;
 
-        let method = parts
-            .next()
-            .context(RequestParserError::MalformedRequestLine)?;
-        let request_target = parts
-            .next()
-            .context(RequestParserError::MalformedRequestLine)?;
-        let version = parts
-            .next()
-            .context(RequestParserError::MalformedRequestLine)?;
-
-        if parts.next().is_some() {
-            Err(RequestParserError::MalformedRequestLine)?;
+        if spaces.next().is_some() {
+            return Err(RequestParserError::MalformedRequestLine.into());
         }
 
-        let method = match method {
-            b"GET" => RequestMethod::GET,
-            b"POST" => RequestMethod::POST,
-            b"PUT" => RequestMethod::PUT,
-            b"DELETE" => RequestMethod::DELETE,
-            b"HEAD" => RequestMethod::HEAD,
-            b"OPTIONS" => RequestMethod::OPTIONS,
-            b"PATCH" => RequestMethod::PATCH,
+        let method = &line[..sp_one];
+        let request_target = &line[sp_one + 1..sp_two];
+        let http_version = &line[sp_two + 1..];
+
+        let method = match method.len() {
+            3 => match method {
+                b"GET" => RequestMethod::GET,
+                b"PUT" => RequestMethod::PUT,
+                _ => return Err(RequestParserError::InvalidRequestMethod)?,
+            },
+            4 => match method {
+                b"POST" => RequestMethod::POST,
+                b"HEAD" => RequestMethod::HEAD,
+                _ => return Err(RequestParserError::InvalidRequestMethod)?,
+            },
+            5 => match method {
+                b"PATCH" => RequestMethod::PATCH,
+                _ => return Err(RequestParserError::InvalidRequestMethod)?,
+            },
+            6 => match method {
+                b"DELETE" => RequestMethod::DELETE,
+                _ => return Err(RequestParserError::InvalidRequestMethod)?,
+            },
+            7 => match method {
+                b"OPTIONS" => RequestMethod::OPTIONS,
+                _ => return Err(RequestParserError::InvalidRequestMethod)?,
+            },
             _ => return Err(RequestParserError::InvalidRequestMethod)?,
         };
 
         let request_target = BytesMut::from(request_target);
 
-        let version = match version {
+        let http_version = match http_version {
             b"HTTP/1.1" => HttpVersion::HTTP1_1,
             _ => return Err(RequestParserError::UnsupportedHttpVersion)?,
         };
@@ -107,7 +118,7 @@ impl RequestParser {
         Ok(RequestLine {
             method,
             request_target,
-            http_version: version,
+            http_version,
         })
     }
 
@@ -231,6 +242,19 @@ mod tests {
         let data = b"GET / HTTP/1.1 extra\r\nHost: localhost:42069\r\nUser-Agent: curl/7.81.0\r\nAccept: */*\r\n\r\n";
         let mut req_parser = RequestParser::new(1024);
         let r = req_parser.parse(data);
+        assert!(r.is_err());
+        assert!(matches!(
+            r.err().unwrap().downcast_ref::<RequestParserError>(),
+            Some(RequestParserError::MalformedRequestLine)
+        ));
+    }
+    
+    #[test]
+    fn parse_request_line_invalid_target() {
+        let data = b"GET --hello<'-'>bye-- HTTP/1.1\r\nHost: localhost:42069\r\nUser-Agent: curl/7.81.0\r\nAccept: */*\r\n\r\n";
+        let mut req_parser = RequestParser::new(1024);
+        let r = req_parser.parse(data);
+        dbg!(&r);
         assert!(r.is_err());
         assert!(matches!(
             r.err().unwrap().downcast_ref::<RequestParserError>(),

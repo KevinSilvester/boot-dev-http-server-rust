@@ -3,6 +3,7 @@ mod connection;
 mod header;
 mod readers;
 mod request;
+mod simd;
 
 use smol::io::AsyncWriteExt;
 use smol::net::TcpListener;
