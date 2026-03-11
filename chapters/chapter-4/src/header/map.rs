@@ -25,7 +25,7 @@ use super::*;
 
 /// There isn't a clear limit to the now many value should be allowed, but I'm limiting it to
 /// 4 because that's the limit in the `actix-http` crate
-const MAP_VALUES_PER_HEADER: usize = 4;
+const MAX_VALUES_PER_HEADER: usize = 4;
 
 /// A helper trait for converting various types into `HeaderName` and `HeaderValue`
 pub trait HeaderThing<T> {
@@ -106,7 +106,7 @@ pub struct HeaderMap {
 
 #[derive(Debug, Clone, Default)]
 pub struct Value {
-    inner: ArrayVec<HeaderValue, MAP_VALUES_PER_HEADER>,
+    inner: ArrayVec<HeaderValue, MAX_VALUES_PER_HEADER>,
 }
 
 impl Value {
@@ -200,7 +200,11 @@ impl HeaderMap {
 
         match self.inner.entry(name) {
             Entry::Occupied(mut entry) => {
-                entry.get_mut().append(value);
+                let vals = entry.get_mut();
+                if vals.len() >= MAX_VALUES_PER_HEADER {
+                    anyhow::bail!("Too many values for header");
+                }
+                vals.append(value);
             }
             Entry::Vacant(entry) => {
                 entry.insert(Value::one(value));
@@ -360,30 +364,33 @@ mod tests {
 
         map.append(common_headers::COOKIE, "3").unwrap();
         map.append(common_headers::COOKIE, "4").unwrap();
-        map.append(common_headers::COOKIE, "5").unwrap();
         let mut vals = map.get_all(common_headers::COOKIE).unwrap();
         assert_eq!(vals.next().unwrap().as_bytes(), b"1");
         assert_eq!(vals.next().unwrap().as_bytes(), b"2");
         assert_eq!(vals.next().unwrap().as_bytes(), b"3");
         assert_eq!(vals.next().unwrap().as_bytes(), b"4");
+        assert!(vals.next().is_none());
+
+        let t1 = map.append(common_headers::COOKIE, "too many 1".as_bytes());
+        let t2 = map.append(common_headers::COOKIE, "too many 2".as_bytes());
+        assert!(t1.is_err());
+        assert!(t2.is_err());
+
+        let _ = map.insert(common_headers::COOKIE, "5");
+        let mut vals = map.get_all(common_headers::COOKIE).unwrap();
         assert_eq!(vals.next().unwrap().as_bytes(), b"5");
         assert!(vals.next().is_none());
 
         let _ = map.insert(common_headers::COOKIE, "6");
-        let mut vals = map.get_all(common_headers::COOKIE).unwrap();
-        assert_eq!(vals.next().unwrap().as_bytes(), b"6");
-        assert!(vals.next().is_none());
-
         let _ = map.insert(common_headers::COOKIE, "7");
-        let _ = map.insert(common_headers::COOKIE, "8");
         let mut vals = map.get_all(common_headers::COOKIE).unwrap();
-        assert_eq!(vals.next().unwrap().as_bytes(), b"8");
+        assert_eq!(vals.next().unwrap().as_bytes(), b"7");
         assert!(vals.next().is_none());
 
-        map.append(common_headers::COOKIE, "9").unwrap();
+        map.append(common_headers::COOKIE, "8").unwrap();
         let mut vals = map.get_all(common_headers::COOKIE).unwrap();
+        assert_eq!(vals.next().unwrap().as_bytes(), b"7");
         assert_eq!(vals.next().unwrap().as_bytes(), b"8");
-        assert_eq!(vals.next().unwrap().as_bytes(), b"9");
         assert!(vals.next().is_none());
 
         // check for fused-ness
