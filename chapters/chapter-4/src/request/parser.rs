@@ -4,12 +4,23 @@ use thiserror::Error;
 
 use super::line::{HttpVersion, RequestLine, RequestMethod};
 
-/// ref: https://community.cloudflare.com/t/maximum-on-http-header-values/424067/3
-const MAX_REQUEST_LINE_SIZE: usize = 8 << 10;
-const MIN_REQUEST_LINE_SIZE: usize = 14; // e.g. "GET / HTTP/1.1\r\n"
+/// The request line is composed of 3 sections (excluding the \r\n new-line delimiter).
+/// 1. The method (e.g. GET, POST, etc.)
+/// 2. The request target (e.g. /, /path/to/resource, etc
+/// 3. The HTTP version (e.g. HTTP/1.1, HTTP/2.0, etc.)
+///
+/// The maximum combined bytes lengths of the method (OPTIONS), HTTP version (HTTP/1.1) and the
+/// 2 space characters in between the sections is 17B.
+/// This leaves the rest of the 2KiB for the request target, which should be plenty.
+/// Ideally the this length should be configurable and would default to the longest possible
+/// request-endpoint path of the server.
+const MAX_REQUEST_LINE_SIZE: usize = 2 << 10;
+const MIN_REQUEST_LINE_SIZE: usize = 14; // "GET / HTTP/1.1\r\n"
 
+/// ref: https://community.cloudflare.com/t/maximum-on-http-header-values/424067/3
 const MAX_HEADER_SIZE: usize = 32 << 10;
 const MAX_HEADER_LINE_SIZE: usize = 8 << 10;
+const MIN_HEADER_LINE_SIZE: usize = 3; // e.g. "A: \r\n"
 
 #[derive(Debug, Clone)]
 pub enum RequestParserState {
@@ -45,8 +56,14 @@ pub enum RequestParserError {
     #[error("Header line too long")]
     HeaderLineTooLong,
 
+    #[error("Header line malformed")]
+    MalformedHeaderLine,
+
     #[error("Body too large")]
     BodyTooLarge,
+
+    #[error("Body missing bytes: {0}")]
+    BodyMissingBytes(usize),
 }
 
 #[derive(Debug)]
@@ -57,6 +74,16 @@ pub struct RequestParser {
 }
 
 impl RequestParser {
+    const GET_: u32 = u32::from_ne_bytes(*b"GET ");
+    const PUT_: u32 = u32::from_ne_bytes(*b"PUT ");
+    const POST: u32 = u32::from_ne_bytes(*b"POST");
+    const HEAD: u32 = u32::from_ne_bytes(*b"HEAD");
+    const PATC: u32 = u32::from_ne_bytes(*b"PATC");
+    const DELE: u32 = u32::from_ne_bytes(*b"DELE");
+    const OPTI: u32 = u32::from_ne_bytes(*b"OPTI");
+
+    const HTTP_1_1: u64 = u64::from_ne_bytes(*b"HTTP/1.1");
+
     pub fn new(max_body_size: usize) -> Self {
         Self {
             state: RequestParserState::RequestLine,
@@ -71,47 +98,55 @@ impl RequestParser {
 
     pub fn parse_request_line(line: &[u8]) -> anyhow::Result<RequestLine> {
         let mut spaces = memchr::memchr_iter(b' ', line);
-        let sp_one = spaces.next().context(RequestParserError::MalformedRequestLine)?;
-        let sp_two = spaces.next().context(RequestParserError::MalformedRequestLine)?;
+        let sp_1 = spaces
+            .next()
+            .context(RequestParserError::MalformedRequestLine)?;
+        let sp_2 = spaces
+            .next()
+            .context(RequestParserError::MalformedRequestLine)?;
 
         if spaces.next().is_some() {
             return Err(RequestParserError::MalformedRequestLine.into());
         }
 
-        let method = &line[..sp_one];
-        let request_target = &line[sp_one + 1..sp_two];
-        let http_version = &line[sp_two + 1..];
+        // - The first space must be at least at the 3th index
+        // - The request target must be at least 1 byte (/).
+        // - The HTTP version must be at least 8 bytes (HTTP/1.1).
+        if sp_1 < 3 || (sp_2 - sp_1) < 2 || (line.len() - sp_2) != 9 {
+            return Err(RequestParserError::MalformedRequestLine.into());
+        }
 
-        let method = match method.len() {
-            3 => match method {
-                b"GET" => RequestMethod::GET,
-                b"PUT" => RequestMethod::PUT,
-                _ => return Err(RequestParserError::InvalidRequestMethod)?,
-            },
-            4 => match method {
-                b"POST" => RequestMethod::POST,
-                b"HEAD" => RequestMethod::HEAD,
-                _ => return Err(RequestParserError::InvalidRequestMethod)?,
-            },
-            5 => match method {
-                b"PATCH" => RequestMethod::PATCH,
-                _ => return Err(RequestParserError::InvalidRequestMethod)?,
-            },
-            6 => match method {
-                b"DELETE" => RequestMethod::DELETE,
-                _ => return Err(RequestParserError::InvalidRequestMethod)?,
-            },
-            7 => match method {
-                b"OPTIONS" => RequestMethod::OPTIONS,
-                _ => return Err(RequestParserError::InvalidRequestMethod)?,
-            },
+        let method = u32::from_ne_bytes([line[0], line[1], line[2], line[3]]);
+        let request_target = &line[sp_1 + 1..sp_2];
+        let http_version = u64::from_ne_bytes([
+            line[sp_2 + 1],
+            line[sp_2 + 2],
+            line[sp_2 + 3],
+            line[sp_2 + 4],
+            line[sp_2 + 5],
+            line[sp_2 + 6],
+            line[sp_2 + 7],
+            line[sp_2 + 8],
+        ]);
+
+        let method = match method {
+            Self::GET_ => RequestMethod::GET,
+            Self::PUT_ => RequestMethod::PUT,
+            Self::POST => RequestMethod::POST,
+            Self::HEAD => RequestMethod::HEAD,
+            Self::PATC if line[4] == b'H' => RequestMethod::PATCH,
+            Self::DELE if line[4] == b'T' && line[5] == b'E' => RequestMethod::DELETE,
+            Self::OPTI if line[4] == b'O' && line[5] == b'N' && line[6] == b'S' => {
+                RequestMethod::OPTIONS
+            }
             _ => return Err(RequestParserError::InvalidRequestMethod)?,
         };
 
+        // TODO: validate request target (e.g. no spaces, no control characters, etc.)
         let request_target = BytesMut::from(request_target);
 
         let http_version = match http_version {
-            b"HTTP/1.1" => HttpVersion::HTTP1_1,
+            Self::HTTP_1_1 => HttpVersion::HTTP_1_1,
             _ => return Err(RequestParserError::UnsupportedHttpVersion)?,
         };
 
@@ -122,26 +157,33 @@ impl RequestParser {
         })
     }
 
-    fn line_end_pos(&self, buf: &[u8], limit: usize) -> anyhow::Result<usize> {
+    fn line_end_pos(&self, buf: &[u8], max_size: usize, min_size: usize) -> anyhow::Result<usize> {
         let lf = match memchr::memchr(b'\n', buf) {
             Some(nl) => nl,
             None => return Ok(0),
         };
-        let cr = lf - 1;
 
-        if lf > limit {
-            match self.state {
-                RequestParserState::RequestLine => Err(RequestParserError::RequestLineTooLong)?,
-                RequestParserState::Headers => Err(RequestParserError::HeaderLineTooLong)?,
-                _ => Err(RequestParserError::BodyTooLarge)?,
-            }
+        if lf > max_size - 1 {
+            Err(match self.state {
+                RequestParserState::RequestLine => RequestParserError::RequestLineTooLong,
+                RequestParserState::Headers => RequestParserError::HeaderLineTooLong,
+                _ => unreachable!(),
+            })?
         }
 
-        if lf < 1 || buf[cr] != b'\r' {
-            return Err(RequestParserError::InvalidLineEnding.into());
+        if lf < min_size - 1 {
+            Err(match self.state {
+                RequestParserState::RequestLine => RequestParserError::MalformedRequestLine,
+                RequestParserState::Headers => RequestParserError::MalformedHeaderLine,
+                _ => unreachable!(),
+            })?
         }
 
-        Ok(cr)
+        if lf == 0 || buf[lf - 1] != b'\r' {
+            return Err(RequestParserError::InvalidLineEnding)?;
+        }
+
+        Ok(lf)
     }
 
     pub fn parse(&mut self, buf: &[u8]) -> anyhow::Result<usize> {
@@ -150,12 +192,10 @@ impl RequestParser {
         loop {
             match self.state {
                 RequestParserState::RequestLine => {
-                    let line_end = self.line_end_pos(buf, MAX_REQUEST_LINE_SIZE)?;
-                    if line_end < MIN_REQUEST_LINE_SIZE {
-                        break;
-                    }
-                    read += line_end + 2; // +2 for \r\n
-                    self.request_line = Some(Self::parse_request_line(&buf[..line_end])?);
+                    let line_end =
+                        self.line_end_pos(buf, MAX_REQUEST_LINE_SIZE, MIN_REQUEST_LINE_SIZE)?;
+                    read += line_end;
+                    self.request_line = Some(Self::parse_request_line(&buf[..line_end - 1])?);
                     self.state = RequestParserState::Headers;
                 }
                 RequestParserState::Headers => {
@@ -193,7 +233,7 @@ mod tests {
 
         assert!(matches!(request_line.method, RequestMethod::GET));
         assert_eq!(&request_line.request_target[..], b"/");
-        assert!(matches!(request_line.http_version, HttpVersion::HTTP1_1));
+        assert!(matches!(request_line.http_version, HttpVersion::HTTP_1_1));
     }
 
     #[test]
@@ -210,7 +250,7 @@ mod tests {
         };
         assert!(matches!(request_line.method, RequestMethod::POST));
         assert_eq!(&request_line.request_target[..], b"/path/to/resource");
-        assert!(matches!(request_line.http_version, HttpVersion::HTTP1_1));
+        assert!(matches!(request_line.http_version, HttpVersion::HTTP_1_1));
     }
 
     #[test]
@@ -248,13 +288,13 @@ mod tests {
             Some(RequestParserError::MalformedRequestLine)
         ));
     }
-    
+
     #[test]
     fn parse_request_line_invalid_target() {
         let data = b"GET --hello<'-'>bye-- HTTP/1.1\r\nHost: localhost:42069\r\nUser-Agent: curl/7.81.0\r\nAccept: */*\r\n\r\n";
         let mut req_parser = RequestParser::new(1024);
         let r = req_parser.parse(data);
-        dbg!(&r);
+        dbg!(&req_parser.request_line);
         assert!(r.is_err());
         assert!(matches!(
             r.err().unwrap().downcast_ref::<RequestParserError>(),

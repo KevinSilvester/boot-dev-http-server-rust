@@ -12,8 +12,9 @@ pub enum RequestMethod {
 }
 
 #[derive(Debug)]
+#[allow(non_camel_case_types)]
 pub enum HttpVersion {
-    HTTP1_1,
+    HTTP_1_1,
 }
 
 #[derive(Debug)]
