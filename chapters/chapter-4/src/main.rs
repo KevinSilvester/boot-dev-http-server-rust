@@ -4,6 +4,7 @@ mod header;
 mod readers;
 mod request;
 mod simd;
+mod utils;
 
 use smol::io::AsyncWriteExt;
 use smol::net::TcpListener;

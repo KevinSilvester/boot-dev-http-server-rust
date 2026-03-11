@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use smol::io::AsyncReadExt;
+use smol::io::{AsyncReadExt, AsyncWriteExt};
 use smol::net::TcpListener;
 
 use crate::config::ServerConfig;
@@ -17,6 +17,9 @@ pub struct Connection {
 pub async fn handle_connections(listener: TcpListener, config: ServerConfig) -> anyhow::Result<()> {
     loop {
         let (mut stream, _peer_addr) = listener.accept().await?;
+
+        // start a request timer
+        let request_timer = std::time::Instant::now();
 
         // let's just construct a simple request first before we move onto the complicated stuff
         // like the entire connection, the response, middleware, request extensions
@@ -41,6 +44,14 @@ pub async fn handle_connections(listener: TcpListener, config: ServerConfig) -> 
             buf_len -= read;
         }
 
+        let time = request_timer.elapsed();
         println!("Request parsed: {:#?}", req_parser.request_line);
+        println!("Request parsing took: {} us", time.as_micros());
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 29\r\nContent-Type: text/plain\r\n\r\nActix ain't got shit on me!!!")
+            .await?;
+
+        let time = request_timer.elapsed();
+        println!("Response sent in    : {} us", time.as_micros());
     }
 }
