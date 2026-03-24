@@ -21,6 +21,16 @@ const MIN_REQUEST_LINE_SIZE: usize = 14; // "GET / HTTP/1.1\r\n"
 const MAX_HEADER_SIZE: usize = 32 << 10;
 const MAX_HEADER_LINE_SIZE: usize = 8 << 10;
 const MIN_HEADER_LINE_SIZE: usize = 3; // e.g. "A: \r\n"
+//
+const GET_: u32 = u32::from_ne_bytes(*b"GET ");
+const PUT_: u32 = u32::from_ne_bytes(*b"PUT ");
+const POST: u32 = u32::from_ne_bytes(*b"POST");
+const HEAD: u32 = u32::from_ne_bytes(*b"HEAD");
+const PATC: u32 = u32::from_ne_bytes(*b"PATC");
+const DELE: u32 = u32::from_ne_bytes(*b"DELE");
+const OPTI: u32 = u32::from_ne_bytes(*b"OPTI");
+
+const HTTP_1_1: u64 = u64::from_ne_bytes(*b"HTTP/1.1");
 
 #[derive(Debug, Clone)]
 pub enum RequestParserState {
@@ -74,16 +84,6 @@ pub struct RequestParser {
 }
 
 impl RequestParser {
-    const GET_: u32 = u32::from_ne_bytes(*b"GET ");
-    const PUT_: u32 = u32::from_ne_bytes(*b"PUT ");
-    const POST: u32 = u32::from_ne_bytes(*b"POST");
-    const HEAD: u32 = u32::from_ne_bytes(*b"HEAD");
-    const PATC: u32 = u32::from_ne_bytes(*b"PATC");
-    const DELE: u32 = u32::from_ne_bytes(*b"DELE");
-    const OPTI: u32 = u32::from_ne_bytes(*b"OPTI");
-
-    const HTTP_1_1: u64 = u64::from_ne_bytes(*b"HTTP/1.1");
-
     pub fn new(max_body_size: usize) -> Self {
         Self {
             state: RequestParserState::RequestLine,
@@ -96,7 +96,7 @@ impl RequestParser {
         matches!(self.state, RequestParserState::Done)
     }
 
-    pub fn parse_request_line(line: &[u8]) -> anyhow::Result<RequestLine> {
+    fn parse_request_line(line: &[u8]) -> anyhow::Result<RequestLine> {
         let mut spaces = memchr::memchr_iter(b' ', line);
         let sp_1 = spaces
             .next()
@@ -130,15 +130,13 @@ impl RequestParser {
         ]);
 
         let method = match method {
-            Self::GET_ => RequestMethod::GET,
-            Self::PUT_ => RequestMethod::PUT,
-            Self::POST => RequestMethod::POST,
-            Self::HEAD => RequestMethod::HEAD,
-            Self::PATC if line[4] == b'H' => RequestMethod::PATCH,
-            Self::DELE if line[4] == b'T' && line[5] == b'E' => RequestMethod::DELETE,
-            Self::OPTI if line[4] == b'O' && line[5] == b'N' && line[6] == b'S' => {
-                RequestMethod::OPTIONS
-            }
+            GET_ => RequestMethod::GET,
+            PUT_ => RequestMethod::PUT,
+            POST => RequestMethod::POST,
+            HEAD => RequestMethod::HEAD,
+            PATC if line[4] == b'H' => RequestMethod::PATCH,
+            DELE if line[4] == b'T' && line[5] == b'E' => RequestMethod::DELETE,
+            OPTI if line[4] == b'O' && line[5] == b'N' && line[6] == b'S' => RequestMethod::OPTIONS,
             _ => return Err(RequestParserError::InvalidRequestMethod)?,
         };
 
@@ -146,7 +144,7 @@ impl RequestParser {
         let request_target = BytesMut::from(request_target);
 
         let http_version = match http_version {
-            Self::HTTP_1_1 => HttpVersion::HTTP_1_1,
+            HTTP_1_1 => HttpVersion::HTTP_1_1,
             _ => return Err(RequestParserError::UnsupportedHttpVersion)?,
         };
 
@@ -194,6 +192,9 @@ impl RequestParser {
                 RequestParserState::RequestLine => {
                     let line_end =
                         self.line_end_pos(buf, MAX_REQUEST_LINE_SIZE, MIN_REQUEST_LINE_SIZE)?;
+                    if line_end == 0 {
+                        break;
+                    }
                     read += line_end;
                     self.request_line = Some(Self::parse_request_line(&buf[..line_end - 1])?);
                     self.state = RequestParserState::Headers;
@@ -216,38 +217,97 @@ impl RequestParser {
 mod tests {
     use super::*;
 
+    const GOOD_REQUEST_LINE_GET: &[u8] = b"GET / HTTP/1.1";
+    const GOOD_REQUEST_LINE_POST: &[u8] = b"POST / HTTP/1.1";
+    const GOOD_REQUEST_LINE_HEAD: &[u8] = b"HEAD / HTTP/1.1";
+    const GOOD_REQUEST_LINE_PATCH: &[u8] = b"PATCH / HTTP/1.1";
+    const GOOD_REQUEST_LINE_DELETE: &[u8] = b"DELETE / HTTP/1.1";
+    const GOOD_REQUEST_LINE_OPTIONS: &[u8] = b"OPTIONS / HTTP/1.1";
+    const GOOD_REQUEST_LINE_WITH_PATH: &[u8] = b"POST /path/to/resource HTTP/1.1";
+
+    const BAD_REQUEST_LINE_INVALID_METHOD: &[u8] = b"FOO / HTTP/1.1";
+    const BAD_REQUEST_LINE_UNSUPPORTED_HTTP_VERSION: &[u8] = b"GET / HTTP/2.0";
+    const BAD_REQUEST_LINE_TOO_MANY_PARTS: &[u8] = b"GET / HTTP/1.1 extra";
+    const BAD_REQUEST_LINE_INVALID_TARGET: &[u8] = b"GET --hello<'-'>bye-- HTTP/1.1";
+    const BAD_REQUEST_LINE_TOO_LONG: [u8; MAX_REQUEST_LINE_SIZE + 1] = build_bad_request_line();
+
+    const fn build_bad_request_line() -> [u8; MAX_REQUEST_LINE_SIZE + 1] {
+        let mut line = [b'a'; MAX_REQUEST_LINE_SIZE + 1];
+
+        line[0] = b'G';
+        line[1] = b'E';
+        line[2] = b'T';
+        line[3] = b' ';
+        line[4] = b'/';
+
+        let i = MAX_REQUEST_LINE_SIZE + 1 - 11;
+
+        line[i] = b' ';
+        line[i + 1] = b'H';
+        line[i + 2] = b'T';
+        line[i + 3] = b'T';
+        line[i + 4] = b'P';
+        line[i + 5] = b'/';
+        line[i + 6] = b'1';
+        line[i + 7] = b'.';
+        line[i + 8] = b'1';
+        line[i + 9] = b'\r';
+        line[i + 10] = b'\n';
+
+        line
+    }
+
     #[test]
-    fn parse_request_line_good() {
-        let data = b"GET / HTTP/1.1\r\nHost: localhost:42069\r\nUser-Agent: curl/7.81.0\r\nAccept: */*\r\n\r\n";
-
-        let mut req_parser = RequestParser::new(1024);
-        let _ = match req_parser.parse(data) {
-            Ok(n) => n,
-            Err(e) => panic!("Error parsing request: {e}"),
-        };
-
-        let request_line = match req_parser.request_line {
-            Some(ref rl) => rl,
-            None => panic!("Request line should be parsed!"),
-        };
-
+    fn parse_good_request_line_get() {
+        let request_line = RequestParser::parse_request_line(GOOD_REQUEST_LINE_GET).unwrap();
         assert!(matches!(request_line.method, RequestMethod::GET));
         assert_eq!(&request_line.request_target[..], b"/");
         assert!(matches!(request_line.http_version, HttpVersion::HTTP_1_1));
     }
 
     #[test]
+    fn parse_good_request_line_post() {
+        let request_line = RequestParser::parse_request_line(GOOD_REQUEST_LINE_POST).unwrap();
+        assert!(matches!(request_line.method, RequestMethod::POST));
+        assert_eq!(&request_line.request_target[..], b"/");
+        assert!(matches!(request_line.http_version, HttpVersion::HTTP_1_1));
+    }
+
+    #[test]
+    fn parse_good_request_line_head() {
+        let request_line = RequestParser::parse_request_line(GOOD_REQUEST_LINE_HEAD).unwrap();
+        assert!(matches!(request_line.method, RequestMethod::HEAD));
+        assert_eq!(&request_line.request_target[..], b"/");
+        assert!(matches!(request_line.http_version, HttpVersion::HTTP_1_1));
+    }
+
+    #[test]
+    fn parse_good_request_line_patch() {
+        let request_line = RequestParser::parse_request_line(GOOD_REQUEST_LINE_PATCH).unwrap();
+        assert!(matches!(request_line.method, RequestMethod::PATCH));
+        assert_eq!(&request_line.request_target[..], b"/");
+        assert!(matches!(request_line.http_version, HttpVersion::HTTP_1_1));
+    }
+
+    #[test]
+    fn parse_good_request_line_delete() {
+        let request_line = RequestParser::parse_request_line(GOOD_REQUEST_LINE_DELETE).unwrap();
+        assert!(matches!(request_line.method, RequestMethod::DELETE));
+        assert_eq!(&request_line.request_target[..], b"/");
+        assert!(matches!(request_line.http_version, HttpVersion::HTTP_1_1));
+    }
+
+    #[test]
+    fn parse_good_request_line_options() {
+        let request_line = RequestParser::parse_request_line(GOOD_REQUEST_LINE_OPTIONS).unwrap();
+        assert!(matches!(request_line.method, RequestMethod::OPTIONS));
+        assert_eq!(&request_line.request_target[..], b"/");
+        assert!(matches!(request_line.http_version, HttpVersion::HTTP_1_1));
+    }
+
+    #[test]
     fn parse_request_line_good_with_path() {
-        let data = b"POST /path/to/resource HTTP/1.1\r\nHost: localhost:42069\r\nUser-Agent: curl/8.16.0\r\nAccept: */*\r\n\r\n";
-        let mut req_parser = RequestParser::new(1024);
-        let _ = match req_parser.parse(data) {
-            Ok(n) => n,
-            Err(e) => panic!("Error parsing request: {e}"),
-        };
-        let request_line = match req_parser.request_line {
-            Some(ref rl) => rl,
-            None => panic!("Request line should be parsed!"),
-        };
+        let request_line = RequestParser::parse_request_line(GOOD_REQUEST_LINE_WITH_PATH).unwrap();
         assert!(matches!(request_line.method, RequestMethod::POST));
         assert_eq!(&request_line.request_target[..], b"/path/to/resource");
         assert!(matches!(request_line.http_version, HttpVersion::HTTP_1_1));
@@ -255,9 +315,7 @@ mod tests {
 
     #[test]
     fn parse_request_line_invalid_method() {
-        let data = b"FOO / HTTP/1.1\r\nHost: localhost:42069\r\nUser-Agent: curl/7.81.0\r\nAccept: */*\r\n\r\n";
-        let mut req_parser = RequestParser::new(1024);
-        let r = req_parser.parse(data);
+        let r = RequestParser::parse_request_line(BAD_REQUEST_LINE_INVALID_METHOD);
         assert!(r.is_err());
         assert!(matches!(
             r.err().unwrap().downcast_ref::<RequestParserError>(),
@@ -267,9 +325,7 @@ mod tests {
 
     #[test]
     fn parse_request_line_invalid_version() {
-        let data = b"GET / HTTP/2.0\r\nHost: localhost:42069\r\nUser-Agent: curl/7.81.0\r\nAccept: */*\r\n\r\n";
-        let mut req_parser = RequestParser::new(1024);
-        let r = req_parser.parse(data);
+        let r = RequestParser::parse_request_line(BAD_REQUEST_LINE_UNSUPPORTED_HTTP_VERSION);
         assert!(r.is_err());
         assert!(matches!(
             r.err().unwrap().downcast_ref::<RequestParserError>(),
@@ -279,9 +335,7 @@ mod tests {
 
     #[test]
     fn parse_request_line_invalid_number_of_parts() {
-        let data = b"GET / HTTP/1.1 extra\r\nHost: localhost:42069\r\nUser-Agent: curl/7.81.0\r\nAccept: */*\r\n\r\n";
-        let mut req_parser = RequestParser::new(1024);
-        let r = req_parser.parse(data);
+        let r = RequestParser::parse_request_line(BAD_REQUEST_LINE_TOO_MANY_PARTS);
         assert!(r.is_err());
         assert!(matches!(
             r.err().unwrap().downcast_ref::<RequestParserError>(),
@@ -291,10 +345,7 @@ mod tests {
 
     #[test]
     fn parse_request_line_invalid_target() {
-        let data = b"GET --hello<'-'>bye-- HTTP/1.1\r\nHost: localhost:42069\r\nUser-Agent: curl/7.81.0\r\nAccept: */*\r\n\r\n";
-        let mut req_parser = RequestParser::new(1024);
-        let r = req_parser.parse(data);
-        dbg!(&req_parser.request_line);
+        let r = RequestParser::parse_request_line(BAD_REQUEST_LINE_INVALID_TARGET);
         assert!(r.is_err());
         assert!(matches!(
             r.err().unwrap().downcast_ref::<RequestParserError>(),
@@ -304,15 +355,8 @@ mod tests {
 
     #[test]
     fn parse_request_line_too_long() {
-        let long_request_target = vec![b'a'; MAX_REQUEST_LINE_SIZE + 1];
-        let data = [
-            &b"GET / "[..],
-            &long_request_target[..],
-            b" HTTP/1.1\r\nHost: localhost:42069\r\nUser-Agent: curl/7.81.0\r\nAccept: */*\r\n\r\n",
-        ]
-        .concat();
         let mut req_parser = RequestParser::new(1024);
-        let r = req_parser.parse(&data);
+        let r = req_parser.parse(&BAD_REQUEST_LINE_TOO_LONG);
         assert!(r.is_err());
         assert!(matches!(
             r.err().unwrap().downcast_ref::<RequestParserError>(),
