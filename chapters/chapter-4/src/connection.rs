@@ -29,7 +29,7 @@ pub async fn handle_connections(listener: TcpListener, config: ServerConfig) -> 
 
         while !req_parser.done() {
             let n = match stream.read(&mut stream_buffer).await {
-                Ok(0) => break, // EOF
+                Ok(0) => break, // end of request
                 Ok(n) => n,
                 Err(_) => panic!("Error handled!!! 💀"),
             };

@@ -1,6 +1,8 @@
 mod map;
+mod map2;
 
 pub use map::{HeaderMap, HeaderThing, Value};
+pub use map2::HeaderMap2;
 
 pub use http::header::{HeaderName, HeaderValue, InvalidHeaderName, InvalidHeaderValue};
 
