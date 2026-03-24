@@ -19,7 +19,8 @@
 use std::collections::hash_map::Entry;
 
 use arrayvec::ArrayVec;
-use gxhash::HashMap;
+use rapidhash::RapidHashMap as HashMap;
+use smallvec::{SmallVec, smallvec};
 
 use super::*;
 
@@ -221,7 +222,15 @@ impl HeaderMap {
         });
     }
 
-    pub fn get(
+    pub fn get(&self, name: impl HeaderThing<HeaderName>) -> anyhow::Result<Option<&HeaderValue>> {
+        let name = try_to_thing!(name, "Invalid HeaderName");
+        match self.inner.get(&name) {
+            Some(vals) => Ok(vals.nth(0)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn get_nth(
         &self,
         name: impl HeaderThing<HeaderName>,
         index: usize,
@@ -322,7 +331,7 @@ mod tests {
             true
         });
         assert_eq!(map.len(), 1);
-        assert_eq!(map.get("host", 0).unwrap().unwrap(), "replaced");
+        assert_eq!(map.get_nth("host", 0).unwrap().unwrap(), "replaced");
     }
 
     #[test]
