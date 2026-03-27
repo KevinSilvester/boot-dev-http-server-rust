@@ -10,16 +10,16 @@ smol = { workspace = true }
 thiserror = { workspace = true }
 bytes = { workspace = true }
 memchr = { workspace = true }
-arrayvec = { workspace = true }
-smallvec = { workspace = true }
-gxhash = { workspace = true }
-rapidhash = "4.4.1"
+# arrayvec = { workspace = true }
+# smallvec = { workspace = true }
+rapidhash = { workspace = true }
 http = { workspace = true }
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
 httparse = "1.10.1"
 actix-http = "3.12.0"
+gxhash = { workspace = true }
 
 [[bench]]
 name = "parse"

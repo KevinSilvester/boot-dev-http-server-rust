@@ -1,9 +1,7 @@
-//! A simplified version of `HeaderMap` implemented in `actix-http`
-//! A multi-map of `HeaderName` to one or more `HeaderValue`s.
-//! This is a trimmed down and altered version of the `HeaderMap` found the in the `actix-http`
-//! crate.
+//! A simplified version of `HeaderMap` implemented in the `http` crate
+//! A multi-map of header-names (`Bytes`) to one or more header-values (`Bytes`).
 //!
-//! <https://github.com/actix/actix-web/blob/main/actix-http/src/header/map.rs>
+//! <https://github.com/hyperium/http/blob/master/src/header/map.rs>
 //!
 //! HTTP 1.1 spec allow the same header to have multiple values in the same request
 //! or response, and the values can be either in the same line separated by commas or in multiple
@@ -15,424 +13,1014 @@
 //! Field2: value3, value4
 //! Field2: value5
 //! ```
+//! In this server implementation, comma separated values will be treated as a single value, and
+//! multiple lines with the same header name will be treated as multiple values.
 
-use std::collections::hash_map::Entry;
+use std::mem;
 
-use arrayvec::ArrayVec;
-use rapidhash::RapidHashMap as HashMap;
-use smallvec::{SmallVec, smallvec};
+use bytes::Bytes;
+// use http::HeaderMap;
+use rapidhash::v3::rapidhash_v3;
+use thiserror::Error;
 
-use super::*;
+/// The load-factor threshold is effectively the maximum percentage of the entries the map can be filled
+/// before it needs to grow the capacity and rehash the entries.
+const LOAD_FACTOR_THRESHOLD: f32 = 0.2;
 
-/// There isn't a clear limit to the now many value should be allowed, but I'm limiting it to
-/// 4 because that's the limit in the `actix-http` crate
-const MAX_VALUES_PER_HEADER: usize = 4;
+/// The sever allows up to 32KB of headers.
+/// The shortest possible header-line that needs to be accounted for is 5 bytes.
+/// i.e `"A:B:\r\n"`
+///
+/// This means that the maximum headers-lines with both a key and value is 32KB / 5 = 6553.6.
+/// Rounded up to 6554.
+/// Since the load factor threshold is 0.2, the maximum capacity of the header map is
+/// 6553.6 / 0.2 = 32768
+const MAX_CAPACITY: usize = 32 << 10;
 
-/// A helper trait for converting various types into `HeaderName` and `HeaderValue`
-pub trait HeaderThing<T> {
-    type Error;
+/// The initial capacity of the header map indices vector list.
+const INITIAL_CAPACITY: usize = 16;
 
-    fn try_to_thing(self) -> Result<T, Self::Error>;
+/// Placeholder hash value to indicate an empty slot in the indices vector list.
+/// Probably not the best way to go about doing this, but it works 🤷
+const POS_HASH_EMPTY: u64 = !0;
+
+/// The maximum distance to probe for an empty slot in the indices vector list before giving up and
+/// returning an error, None or an empty iterator.
+const MAX_PROBE_DISTANCE: usize = 5;
+
+#[derive(Debug, Clone, Copy)]
+struct Pos {
+    /// The hash of the header name, used for quick comparisons during lookups and insertions.
+    hash: u64,
+
+    /// The index of the corresponding bucket in the entries vector list, where the header value is
+    /// stored
+    index: usize,
 }
 
-impl HeaderThing<HeaderName> for &[u8] {
-    type Error = InvalidHeaderName;
+impl Pos {
+    #[inline]
+    pub fn new(hash: u64, index: usize) -> Self {
+        Self { hash, index }
+    }
 
     #[inline]
-    fn try_to_thing(self) -> Result<HeaderName, Self::Error> {
-        HeaderName::from_bytes(self)
-    }
-}
-
-impl HeaderThing<HeaderName> for &str {
-    type Error = InvalidHeaderName;
-
-    #[inline]
-    fn try_to_thing(self) -> Result<HeaderName, Self::Error> {
-        HeaderName::from_bytes(self.as_bytes())
-    }
-}
-
-impl HeaderThing<HeaderName> for HeaderName {
-    type Error = ();
-
-    #[inline]
-    fn try_to_thing(self) -> Result<HeaderName, Self::Error> {
-        Ok(self)
-    }
-}
-
-impl HeaderThing<HeaderValue> for &[u8] {
-    type Error = InvalidHeaderValue;
-
-    #[inline]
-    fn try_to_thing(self) -> Result<HeaderValue, Self::Error> {
-        HeaderValue::from_bytes(self)
-    }
-}
-
-impl HeaderThing<HeaderValue> for &str {
-    type Error = InvalidHeaderValue;
-
-    #[inline]
-    fn try_to_thing(self) -> Result<HeaderValue, Self::Error> {
-        HeaderValue::from_bytes(self.as_bytes())
-    }
-}
-
-impl HeaderThing<HeaderValue> for HeaderValue {
-    type Error = ();
-
-    #[inline]
-    fn try_to_thing(self) -> Result<HeaderValue, Self::Error> {
-        Ok(self)
-    }
-}
-
-macro_rules! try_to_thing {
-    ($thing:expr, $error_msg:literal) => {{
-        match $thing.try_to_thing() {
-            Ok(t) => t,
-            Err(_) => anyhow::bail!($error_msg),
-        }
-    }};
-}
-
-/// A simplified version of `HeaderMap` implemented in `actix-http`
-/// ref: https://github.com/actix/actix-web/blob/main/actix-http/src/header/map.rs
-#[derive(Debug, Clone, Default)]
-pub struct HeaderMap {
-    inner: HashMap<HeaderName, Value>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct Value {
-    inner: ArrayVec<HeaderValue, MAX_VALUES_PER_HEADER>,
-}
-
-impl Value {
-    pub fn one(val: HeaderValue) -> Self {
-        let mut inner = ArrayVec::new();
-        inner.push(val);
-        Self { inner }
-    }
-
-    pub fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    pub fn append(&mut self, value: HeaderValue) {
-        self.inner.push(value);
-    }
-
-    pub fn nth(&self, index: usize) -> Option<&HeaderValue> {
-        if self.inner.is_empty() || index > self.len() {
-            return None;
-        }
-        Some(&self.inner[index])
-    }
-
-    pub fn remove(&mut self, index: usize) -> Option<HeaderValue> {
-        if self.inner.is_empty() || index > self.len() {
-            return None;
-        }
-        Some(self.inner.remove(index))
-    }
-}
-
-impl FromIterator<HeaderValue> for Value {
-    fn from_iter<T: IntoIterator<Item = HeaderValue>>(iter: T) -> Self {
+    pub fn empty() -> Self {
         Self {
-            inner: iter.into_iter().collect(),
+            hash: POS_HASH_EMPTY,
+            index: 0,
         }
     }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.hash == POS_HASH_EMPTY
+    }
+}
+
+/// A Node of of a vector backed linked list used to store the extra values of a header
+#[derive(Debug)]
+struct ExtraValue {
+    value: Bytes,
+    next: Option<usize>,
+    prev: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Link {
+    head: usize,
+    tail: usize,
+}
+
+/// A bucket in the header map, which stores a key-value pair and an optional link to with indices
+/// to the overflow/additional values of the same header-name
+#[derive(Debug)]
+struct Bucket {
+    key: Bytes,
+    value: Bytes,
+    overflow: Option<Link>,
+    overflow_count: usize,
+}
+
+#[derive(Debug, Error)]
+pub enum HeaderMapErrors {
+    #[error("HeaderMap has reached max capacity")]
+    MaxCapacityReached,
+
+    #[error("Map probing limit exceeded")]
+    ProbeLimitExceeded,
+}
+
+/// An iterator over the values of a header
+#[derive(Debug)]
+pub struct ValueIter<'a> {
+    map: &'a HeaderMap,
+    head: Option<usize>,
+    next: Option<usize>,
+    first: Option<&'a [u8]>,
+    first_complete: bool,
+}
+
+impl<'a> ValueIter<'a> {
+    pub fn new(map: &'a HeaderMap, first: Option<&'a [u8]>, head: Option<usize>) -> Self {
+        Self {
+            map,
+            head,
+            next: None,
+            first,
+            first_complete: false,
+        }
+    }
+}
+
+impl<'a> Iterator for ValueIter<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.first?;
+
+        if !self.first_complete {
+            self.first_complete = true;
+            self.next = self.head;
+            return self.first;
+        }
+
+        self.next?;
+
+        let curr_idx = self.next.unwrap();
+        let curr = &self.map.extra_values[curr_idx];
+        self.next = curr.next;
+
+        Some(&curr.value)
+    }
+}
+
+/// An iterator over all header name and values
+#[derive(Debug)]
+pub struct MapIter<'a> {
+    map: &'a HeaderMap,
+    index: usize,
+    indices_left: usize,
+    value_iter: Option<ValueIter<'a>>,
+}
+
+impl<'a> MapIter<'a> {
+    pub fn new(map: &'a HeaderMap) -> Self {
+        Self {
+            map,
+            index: 0,
+            indices_left: map.size,
+            value_iter: None,
+        }
+    }
+}
+
+impl<'a> Iterator for MapIter<'a> {
+    type Item = (&'a [u8], &'a [u8]);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.indices_left == 0 {
+            return None;
+        }
+
+        match self.value_iter.as_mut().and_then(|iter| iter.next()) {
+            Some(value) => {
+                let pos = self.map.indices[self.index];
+                let bucket = &self.map.entries[pos.index];
+                return Some((bucket.key.as_ref(), value));
+            }
+            None => self.index += 1
+        }
+
+        while self.map.indices[self.index].is_empty() {
+            self.index += 1;
+        }
+
+        let pos = self.map.indices[self.index];
+        let bucket = &self.map.entries[pos.index];
+
+        self.value_iter = Some(ValueIter::new(
+            self.map,
+            Some(&bucket.value),
+            bucket.overflow.as_ref().map(|link| link.head),
+        ));
+        self.indices_left -= 1;
+
+        self.value_iter
+            .as_mut()
+            .unwrap()
+            .next()
+            .map(|value| (bucket.key.as_ref(), value))
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct HeaderMap {
+    mask: u16,
+    size: usize,
+    capactiy: usize,
+    values_count: usize,
+    indices: Box<[Pos]>,
+    entries: Vec<Bucket>,
+    extra_values: Vec<ExtraValue>,
 }
 
 impl HeaderMap {
+    pub const MAX_SIZE: usize = (MAX_CAPACITY as f32 * LOAD_FACTOR_THRESHOLD) as usize + 1;
+
+    #[inline]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            mask: 0,
+            size: 0,
+            capactiy: 0,
+            values_count: 0,
+            indices: Box::new([]),
+            entries: Vec::new(),
+            extra_values: Vec::new(),
+        }
     }
 
+    #[inline]
+    fn load_factor(&self) -> f32 {
+        self.size as f32 / self.capactiy as f32
+    }
+
+    #[inline]
     pub fn len(&self) -> usize {
-        self.inner.values().map(|vals| vals.len()).sum()
+        self.size
     }
 
-    pub fn len_keys(&self) -> usize {
-        self.inner.len()
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.capactiy
     }
 
-    pub fn len_vals(&self, name: impl HeaderThing<HeaderName>) -> anyhow::Result<usize> {
-        let name = match name.try_to_thing() {
-            Ok(n) => n,
-            Err(_) => anyhow::bail!("Invalid HeaderName"),
+    #[inline]
+    pub fn values_count(&self) -> usize {
+        self.values_count
+    }
+
+    /// Inserts a key-value pair into the map.
+    /// Replaces any existing value for the same key if present.
+    pub fn insert(&mut self, key: Bytes, value: Bytes) -> Result<Option<Bytes>, HeaderMapErrors> {
+        self.ensure_capacity()?;
+
+        let hash = hash_key(&key);
+        let mut probe = ideal_pos(hash, self.mask);
+        let mut distance = 0;
+
+        while !self.indices[probe].is_empty() {
+            if distance > MAX_PROBE_DISTANCE {
+                return Err(HeaderMapErrors::ProbeLimitExceeded);
+            }
+
+            if self.indices[probe].hash == hash {
+                break;
+            }
+            probe = (probe + 1) & self.mask as usize;
+            distance += 1;
+        }
+
+        let old_value = match self.indices[probe].is_empty() {
+            true => {
+                self.indices[probe] = Pos::new(hash, self.entries.len());
+                self.entries.push(Bucket {
+                    key,
+                    value,
+                    overflow: None,
+                    overflow_count: 0,
+                });
+                self.size += 1;
+                self.values_count += 1;
+                None
+            }
+            false => {
+                let pos = self.indices[probe];
+                let mut new_bucket = Bucket {
+                    key,
+                    value,
+                    overflow: None,
+                    overflow_count: 0,
+                };
+                let old_bucket = &mut self.entries[pos.index];
+                self.values_count -= old_bucket.overflow_count;
+                mem::swap(old_bucket, &mut new_bucket);
+                Some(new_bucket.value)
+            }
         };
-        match self.inner.get(&name) {
-            Some(vals) => Ok(vals.len()),
-            None => anyhow::bail!("Unknown Header"),
+
+        debug_assert!(self.size > 0);
+        debug_assert!(self.size < self.capactiy);
+
+        Ok(old_value)
+    }
+
+    /// Gets the first value associated with the given key, if it exists.
+    pub fn get(&self, key: &[u8]) -> Option<&[u8]> {
+        if self.size == 0 {
+            return None;
         }
-    }
 
-    pub fn contains_key(&self, name: impl HeaderThing<HeaderName>) -> bool {
-        match name.try_to_thing() {
-            Ok(n) => self.inner.contains_key(&n),
-            Err(_) => false,
+        let hash = hash_key(key);
+        let mut probe = ideal_pos(hash, self.mask);
+        let mut distance = 0;
+
+        while !self.indices[probe].is_empty() {
+            if distance > MAX_PROBE_DISTANCE {
+                return None;
+            }
+
+            if self.indices[probe].hash == hash {
+                return Some(&self.entries[self.indices[probe].index].value);
+            }
+            probe = (probe + 1) & self.mask as usize;
+            distance += 1;
         }
+        None
     }
 
-    pub fn insert(
-        &mut self,
-        name: impl HeaderThing<HeaderName>,
-        value: impl HeaderThing<HeaderValue>,
-    ) -> anyhow::Result<Option<Value>> {
-        let name = try_to_thing!(name, "Invalid HeaderName");
-        let value = try_to_thing!(value, "Invalid HeaderValue");
+    /// Gets a mutable reference to the first value associated with the given key, if it exists.
+    pub fn get_mut(&mut self, key: &[u8]) -> Option<&mut Bytes> {
+        if self.size == 0 {
+            return None;
+        }
 
-        let inserted = self.inner.insert(name, Value::one(value));
-        Ok(inserted)
+        let hash = hash_key(key);
+        let mut probe = ideal_pos(hash, self.mask);
+        let mut distance = 0;
+
+        while !self.indices[probe].is_empty() {
+            if distance > MAX_PROBE_DISTANCE {
+                return None;
+            }
+            if self.indices[probe].hash == hash {
+                return Some(&mut self.entries[self.indices[probe].index].value);
+            }
+            probe = (probe + 1) & self.mask as usize;
+            distance += 1;
+        }
+        None
     }
 
-    pub fn append(
-        &mut self,
-        name: impl HeaderThing<HeaderName>,
-        value: impl HeaderThing<HeaderValue>,
-    ) -> anyhow::Result<()> {
-        let name = try_to_thing!(name, "Invalid HeaderName");
-        let value = try_to_thing!(value, "Invalid HeaderValue");
+    /// Appends a value to the list of values associated with the given key.
+    /// If the key does not exist, it will be inserted with the given value.
+    pub fn append(&mut self, key: Bytes, value: Bytes) -> Result<(), HeaderMapErrors> {
+        self.ensure_capacity()?;
 
-        match self.inner.entry(name) {
-            Entry::Occupied(mut entry) => {
-                let vals = entry.get_mut();
-                if vals.len() >= MAX_VALUES_PER_HEADER {
-                    anyhow::bail!("Too many values for header");
+        let hash = hash_key(&key);
+        let mut probe = ideal_pos(hash, self.mask);
+        let mut distance = 0;
+
+        while !self.indices[probe].is_empty() {
+            if distance > MAX_PROBE_DISTANCE {
+                return Err(HeaderMapErrors::ProbeLimitExceeded);
+            }
+
+            if self.indices[probe].hash == hash {
+                break;
+            }
+            probe = (probe + 1) & self.mask as usize;
+            distance += 1;
+        }
+
+        if self.indices[probe].is_empty() {
+            self.indices[probe] = Pos::new(hash, self.entries.len());
+            self.entries.push(Bucket {
+                key,
+                value,
+                overflow: None,
+                overflow_count: 0,
+            });
+            self.size += 1;
+            self.values_count += 1;
+            return Ok(());
+        }
+
+        let pos = self.indices[probe];
+        let bucket = &mut self.entries[pos.index];
+        let mut new_extra = ExtraValue {
+            value,
+            next: None,
+            prev: None,
+        };
+
+        let new_link = match bucket.overflow {
+            Some(link) => {
+                let next = self.extra_values.len();
+                let current_tail = &mut self.extra_values[link.tail];
+
+                new_extra.prev = Some(link.tail);
+                current_tail.next = Some(next);
+
+                Link {
+                    head: link.head,
+                    tail: next,
                 }
-                vals.append(value);
             }
-            Entry::Vacant(entry) => {
-                entry.insert(Value::one(value));
+            None => {
+                let next = self.extra_values.len();
+                Link {
+                    head: next,
+                    tail: next,
+                }
             }
         };
+
+        self.extra_values.push(new_extra);
+        self.values_count += 1;
+        bucket.overflow_count += 1;
+        bucket.overflow = Some(new_link);
 
         Ok(())
     }
 
-    pub fn retain(&mut self, mut retain_fn: impl FnMut(&HeaderName, &mut HeaderValue) -> bool) {
-        self.inner.retain(|name, vals| {
-            vals.inner.retain(|val| retain_fn(name, val));
-            !vals.inner.is_empty()
-        });
-    }
+    /// Removes the values associated with the given key and returns the first value if it exists.
+    pub fn remove(&mut self, key: Bytes) -> Option<&[u8]> {
+        let hash = hash_key(&key);
+        let mut probe = ideal_pos(hash, self.mask);
+        let mut distance = 0;
 
-    pub fn get(&self, name: impl HeaderThing<HeaderName>) -> anyhow::Result<Option<&HeaderValue>> {
-        let name = try_to_thing!(name, "Invalid HeaderName");
-        match self.inner.get(&name) {
-            Some(vals) => Ok(vals.nth(0)),
-            None => Ok(None),
+        while !self.indices[probe].is_empty() {
+            if distance > MAX_PROBE_DISTANCE {
+                return None;
+            }
+
+            if self.indices[probe].hash == hash {
+                break;
+            }
+            probe = (probe + 1) & self.mask as usize;
+            distance += 1;
         }
-    }
 
-    pub fn get_nth(
-        &self,
-        name: impl HeaderThing<HeaderName>,
-        index: usize,
-    ) -> anyhow::Result<Option<&HeaderValue>> {
-        let name = try_to_thing!(name, "Invalid HeaderName");
+        let pos = self.indices[probe];
 
-        match self.inner.get(&name) {
-            Some(vals) => Ok(vals.nth(index)),
-            None => Ok(None),
+        if pos.is_empty() {
+            return None;
         }
+
+        let bucket = &mut self.entries[pos.index];
+
+        self.indices[probe] = Pos::empty();
+        self.size -= 1;
+        self.values_count -= 1 + bucket.overflow_count;
+        Some(&bucket.value)
     }
 
-    pub fn get_all(
-        &self,
-        name: impl HeaderThing<HeaderName>,
-    ) -> anyhow::Result<std::slice::Iter<'_, HeaderValue>> {
-        let name = try_to_thing!(name, "Invalid HeaderName");
+    /// Checks if the map contains the given key.
+    pub fn contains_key(&self, key: &[u8]) -> bool {
+        self.get(key).is_some()
+    }
 
-        match self.inner.get(&name) {
-            Some(values) => Ok(values.inner.iter()),
-            None => Ok([].iter()),
+    /// Clears the map, removing all key-value pairs.
+    pub fn clear(&mut self) {
+        // no need to clear the indices since `ensure_capacity` will create a new boxed slice to
+        // replace as capacity is reset to 0
+        self.entries.clear();
+        self.extra_values.clear();
+        self.size = 0;
+        self.values_count = 0;
+        self.capactiy = 0;
+        self.mask = 0;
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.size == 0
+    }
+
+    /// Checks if the map contains multiple values for the given key.
+    pub fn has_multiple_values(&self, key: &[u8]) -> Option<bool> {
+        if self.size == 0 {
+            return None;
         }
-    }
 
-    pub fn remove(&mut self, name: impl HeaderThing<HeaderName>) -> anyhow::Result<Option<Value>> {
-        let name = try_to_thing!(name, "Invalid HeaderName");
+        let hash = hash_key(key);
+        let mut probe = ideal_pos(hash, self.mask);
+        let mut distance = 0;
 
-        Ok(self.inner.remove(&name))
-    }
-
-    pub fn remove_val(
-        &mut self,
-        name: impl HeaderThing<HeaderName>,
-        index: usize,
-    ) -> anyhow::Result<Option<HeaderValue>> {
-        let name = try_to_thing!(name, "Invalid HeaderName");
-
-        match self.inner.get_mut(&name) {
-            Some(vals) => Ok(vals.remove(index)),
-            None => Ok(None),
+        while !self.indices[probe].is_empty() {
+            if distance > MAX_PROBE_DISTANCE {
+                return None;
+            }
+            if self.indices[probe].hash == hash {
+                return Some(self.entries[self.indices[probe].index].overflow_count > 0);
+            }
+            probe = (probe + 1) & self.mask as usize;
+            distance += 1;
         }
+        Some(false)
+    }
+
+    /// Gets an iterator over all values associated with the given key.
+    pub fn get_all(&self, key: &[u8]) -> ValueIter<'_> {
+        if self.size == 0 {
+            return ValueIter::new(self, None, None);
+        }
+
+        let hash = hash_key(key);
+        let mut probe = ideal_pos(hash, self.mask);
+        let mut distance = 0;
+
+        while !self.indices[probe].is_empty() {
+            if distance > MAX_PROBE_DISTANCE {
+                return ValueIter::new(self, None, None);
+            }
+            if self.indices[probe].hash == hash {
+                break;
+            }
+            probe = (probe + 1) & self.mask as usize;
+            distance += 1;
+        }
+
+        let pos = self.indices[probe];
+        if pos.is_empty() {
+            return ValueIter::new(self, None, None);
+        }
+
+        let bucket = &self.entries[pos.index];
+        ValueIter::new(
+            self,
+            Some(&bucket.value),
+            bucket.overflow.as_ref().map(|link| link.head),
+        )
+    }
+
+    /// Gets an iterator over all key-value pairs in the map.
+    pub fn iter(&self) -> MapIter<'_> {
+        MapIter::new(self)
+    }
+
+    #[inline]
+    fn ensure_capacity(&mut self) -> Result<(), HeaderMapErrors> {
+        // apply the initial values and capacity to the vectors
+        if self.capactiy == 0 {
+            self.capactiy = INITIAL_CAPACITY;
+            self.indices = vec![Pos::empty(); INITIAL_CAPACITY].into_boxed_slice();
+            self.mask = (INITIAL_CAPACITY - 1) as u16;
+            return Ok(());
+        }
+
+        // return early if the load factor is within the threshold
+        if self.load_factor() < LOAD_FACTOR_THRESHOLD {
+            return Ok(());
+        }
+
+        // if not try to grow the vec capacity and rehash the entries
+        self.try_grow(self.capactiy << 1)?;
+        Ok(())
+    }
+
+    #[inline]
+    fn try_grow(&mut self, new_cap: usize) -> Result<(), HeaderMapErrors> {
+        if new_cap > MAX_CAPACITY {
+            return Err(HeaderMapErrors::MaxCapacityReached);
+        }
+
+        self.mask = (new_cap - 1) as u16;
+        let mut new_indices = vec![Pos::empty(); new_cap].into_boxed_slice();
+
+        let mut idx = 0;
+
+        loop {
+            if idx >= self.indices.len() {
+                break;
+            }
+
+            let pos = self.indices[idx];
+            if pos.is_empty() {
+                idx += 1;
+                continue;
+            }
+
+            let mut probe = ideal_pos(pos.hash, self.mask);
+            while !new_indices[probe].is_empty() {
+                probe = (probe + 1) & self.mask as usize;
+            }
+
+            new_indices[probe] = self.indices[idx];
+
+            idx += 1;
+        }
+
+        self.indices = new_indices;
+        self.capactiy = new_cap;
+
+        Ok(())
     }
 }
 
-/// Trimmed down and modified unit tests from the original `HeaderMap` tests in the `actix-http`
-/// crate
+#[inline]
+fn hash_key(key: &[u8]) -> u64 {
+    // let mut hasher = GxHasher::default();
+    // hasher.write(key);
+    // hasher.finish()
+    rapidhash_v3(key)
+}
+
+#[inline]
+fn ideal_pos(hash: u64, mask: u16) -> usize {
+    (hash & (mask as u64)) as usize
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn create() {
-        let map = HeaderMap::new();
-        assert_eq!(map.len(), 0);
-    }
-
-    #[test]
-    fn insert() {
+    fn insert() -> Result<(), HeaderMapErrors> {
         let mut map = HeaderMap::new();
 
-        map.insert(common_headers::LOCATION, "/test").unwrap();
+        if map
+            .insert(
+                Bytes::from_static(b"content-type"),
+                Bytes::from_static(b"text/html"),
+            )?
+            .is_some()
+        {
+            panic!("Expected None, got Some")
+        };
+        match map.insert(
+            Bytes::from_static(b"content-type"),
+            Bytes::from_static(b"text/plain"),
+        )? {
+            Some(old_value) => assert_eq!(old_value, Bytes::from_static(b"text/html")),
+            None => panic!("Expected Some, got None"),
+        }
+        match map.insert(
+            Bytes::from_static(b"content-type"),
+            Bytes::from_static(b"text/css"),
+        )? {
+            Some(old_value) => assert_eq!(old_value, Bytes::from_static(b"text/plain")),
+            None => panic!("Expected Some, got None"),
+        }
+
         assert_eq!(map.len(), 1);
-    }
+        assert_eq!(map.values_count(), 1);
+        assert_eq!(map.capacity(), 16);
 
-    #[test]
-    fn contains() {
-        let mut map = HeaderMap::new();
-        assert!(!map.contains_key(common_headers::LOCATION));
+        if map
+            .insert(
+                Bytes::from_static(b"content-length"),
+                Bytes::from_static(b"123"),
+            )?
+            .is_some()
+        {
+            panic!("Expected None, got Some")
+        }
 
-        map.insert(common_headers::LOCATION, "/test").unwrap();
-        assert!(map.contains_key(common_headers::LOCATION));
-        assert!(map.contains_key(&b"Location"[..]));
-        assert!(map.contains_key("Location"));
-    }
+        match map.insert(
+            Bytes::from_static(b"content-length"),
+            Bytes::from_static(b"456"),
+        )? {
+            Some(old_value) => assert_eq!(old_value, Bytes::from_static(b"123")),
+            None => panic!("Expected Some, got None"),
+        }
 
-    #[test]
-    fn retain() {
-        let mut map = HeaderMap::new();
+        match map.insert(
+            Bytes::from_static(b"content-length"),
+            Bytes::from_static(b"789"),
+        )? {
+            Some(old_value) => assert_eq!(old_value, Bytes::from_static(b"456")),
+            None => panic!("Expected Some, got None"),
+        }
 
-        map.append(common_headers::LOCATION, "/test").unwrap();
-        map.append(common_headers::HOST, "duck.com").unwrap();
-        map.append(common_headers::COOKIE, "one=1").unwrap();
-        map.append(common_headers::COOKIE, "two=2").unwrap();
-
-        assert_eq!(map.len(), 4);
-
-        // by value
-        map.retain(|_, val| !val.as_bytes().contains(&b'/'));
-        assert_eq!(map.len(), 3);
-
-        // by name
-        map.retain(|name, _| name.as_str() != "cookie");
-        assert_eq!(map.len(), 1);
-
-        // keep but mutate value
-        map.retain(|_, val| {
-            *val = HeaderValue::from_static("replaced");
-            true
-        });
-        assert_eq!(map.len(), 1);
-        assert_eq!(map.get_nth("host", 0).unwrap().unwrap(), "replaced");
-    }
-
-    #[test]
-    fn retain_removes_empty_value_lists() {
-        let mut map = HeaderMap::new();
-
-        map.append(common_headers::HOST, "duck.com").unwrap();
-        map.append(common_headers::HOST, "duck.com").unwrap();
+        match map.insert(
+            Bytes::from_static(b"content-length"),
+            Bytes::from_static(b"100"),
+        )? {
+            Some(old_value) => assert_eq!(old_value, Bytes::from_static(b"789")),
+            None => panic!("Expected Some, got None"),
+        }
 
         assert_eq!(map.len(), 2);
-        assert_eq!(map.len_keys(), 1);
-        assert_eq!(map.inner.len(), 1);
+        assert_eq!(map.values_count(), 2);
+        assert_eq!(map.capacity(), 16);
+        Ok(())
+    }
 
-        // remove everything
-        map.retain(|_n, _v| false);
+    #[test]
+    fn insert_many() -> Result<(), HeaderMapErrors> {
+        let mut headers = vec![];
+        for i in 0..100 {
+            let key = format!("key{}", i);
+            let value = format!("value{}", i);
+            headers.push((key, value));
+        }
 
+        let mut map = HeaderMap::new();
+        for (key, value) in headers.iter() {
+            if map
+                .insert(
+                    Bytes::copy_from_slice(key.as_bytes()),
+                    Bytes::copy_from_slice(value.as_bytes()),
+                )?
+                .is_some()
+            {
+                panic!("Expected None, got Some")
+            }
+        }
+
+        assert_eq!(map.len(), 100);
+        assert_eq!(map.values_count(), 100);
+        assert_eq!(map.capacity(), (100 * 5_usize).next_power_of_two());
+        Ok(())
+    }
+
+    #[test]
+    fn insert_until_capacity() -> Result<(), HeaderMapErrors> {
+        let mut headers = vec![];
+        for i in 0..(HeaderMap::MAX_SIZE) {
+            let key = format!("key{}", i);
+            let value = format!("value{}", i);
+            headers.push((key, value));
+        }
+
+        let mut map = HeaderMap::new();
+        for (key, value) in headers.iter() {
+            if map
+                .insert(
+                    Bytes::copy_from_slice(key.as_bytes()),
+                    Bytes::copy_from_slice(value.as_bytes()),
+                )?
+                .is_some()
+            {
+                panic!("Expected None, got Some")
+            }
+        }
+
+        assert_eq!(map.len(), HeaderMap::MAX_SIZE);
+        assert_eq!(map.values_count(), HeaderMap::MAX_SIZE);
+        assert_eq!(map.capacity(), MAX_CAPACITY);
+        Ok(())
+    }
+
+    #[test]
+    fn insert_too_many() -> Result<(), HeaderMapErrors> {
+        let mut headers = vec![];
+        for i in 0..(HeaderMap::MAX_SIZE + 1) {
+            let key = format!("key{}", i);
+            let value = format!("value{}", i);
+            headers.push((key, value));
+        }
+
+        let mut map = HeaderMap::new();
+        for (i, (key, value)) in headers.iter().enumerate() {
+            if i == HeaderMap::MAX_SIZE {
+                match map.insert(
+                    Bytes::copy_from_slice(key.as_bytes()),
+                    Bytes::copy_from_slice(value.as_bytes()),
+                ) {
+                    Ok(_) => panic!("Expected Err, got Ok"),
+                    Err(e) => assert_eq!(e.to_string(), "HeaderMap has reached max capacity"),
+                }
+            } else {
+                if map
+                    .insert(
+                        Bytes::copy_from_slice(key.as_bytes()),
+                        Bytes::copy_from_slice(value.as_bytes()),
+                    )?
+                    .is_some()
+                {
+                    panic!("Expected None, got Some")
+                }
+            }
+        }
+        assert_eq!(map.len(), HeaderMap::MAX_SIZE);
+        assert_eq!(map.values_count(), HeaderMap::MAX_SIZE);
+        assert_eq!(map.capacity(), MAX_CAPACITY);
+        Ok(())
+    }
+
+    #[test]
+    fn get() -> Result<(), HeaderMapErrors> {
+        let mut map = HeaderMap::new();
+
+        assert_eq!(map.get(b"content-type"), None);
+
+        map.insert(
+            Bytes::from_static(b"content-type"),
+            Bytes::from_static(b"text/html"),
+        )?;
+        assert_eq!(map.get(b"content-type"), Some(b"text/html".as_ref()));
+
+        map.insert(
+            Bytes::from_static(b"content-type"),
+            Bytes::from_static(b"text/plain"),
+        )?;
+        assert_eq!(map.get(b"content-type"), Some(b"text/plain".as_ref()));
+
+        map.insert(
+            Bytes::from_static(b"content-length"),
+            Bytes::from_static(b"123"),
+        )?;
+        assert_eq!(map.get(b"content-length"), Some(b"123".as_ref()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn get_mut() -> Result<(), HeaderMapErrors> {
+        let mut map = HeaderMap::new();
+
+        assert_eq!(map.get_mut(b"content-type"), None);
+
+        map.insert(
+            Bytes::from_static(b"content-type"),
+            Bytes::from_static(b"text/html"),
+        )?;
+        assert_eq!(
+            map.get_mut(b"content-type"),
+            Some(&mut Bytes::from_static(b"text/html"))
+        );
+
+        map.insert(
+            Bytes::from_static(b"content-type"),
+            Bytes::from_static(b"text/plain"),
+        )?;
+        assert_eq!(
+            map.get_mut(b"content-type"),
+            Some(&mut Bytes::from_static(b"text/plain"))
+        );
+
+        map.insert(
+            Bytes::from_static(b"content-length"),
+            Bytes::from_static(b"123"),
+        )?;
+        assert_eq!(
+            map.get_mut(b"content-length"),
+            Some(&mut Bytes::from_static(b"123"))
+        );
+
+        let content_type_mut = map.get_mut(b"content-type").unwrap();
+        *content_type_mut = Bytes::from_static(b"text/css");
+
+        assert_eq!(
+            map.get_mut(b"content-type"),
+            Some(&mut Bytes::from_static(b"text/css"))
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn append() -> Result<(), HeaderMapErrors> {
+        let mut map = HeaderMap::new();
+
+        map.append(
+            Bytes::from_static(b"set-cookie"),
+            Bytes::from_static(b"cookie1=value1"),
+        )?;
+        map.append(
+            Bytes::from_static(b"content-type"),
+            Bytes::from_static(b"text/html"),
+        )?;
+
+        map.append(
+            Bytes::from_static(b"set-cookie"),
+            Bytes::from_static(b"cookie2=value2"),
+        )?;
+        map.append(
+            Bytes::from_static(b"content-type"),
+            Bytes::from_static(b"text/plain"),
+        )?;
+
+        map.append(
+            Bytes::from_static(b"set-cookie"),
+            Bytes::from_static(b"cookie3=value3"),
+        )?;
+        map.append(
+            Bytes::from_static(b"content-type"),
+            Bytes::from_static(b"text/css"),
+        )?;
+
+        map.append(
+            Bytes::from_static(b"set-cookie"),
+            Bytes::from_static(b"cookie4=value4"),
+        )?;
+        map.append(
+            Bytes::from_static(b"content-type"),
+            Bytes::from_static(b"text/xml"),
+        )?;
+
+        assert_eq!(map.get(b"set-cookie"), Some(b"cookie1=value1".as_ref()));
+        assert_eq!(map.get(b"content-type"), Some(b"text/html".as_ref()));
+        assert_eq!(map.values_count(), 8);
+        assert_eq!(map.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn remove() -> Result<(), HeaderMapErrors> {
+        let mut map = HeaderMap::new();
+
+        map.insert(
+            Bytes::from_static(b"content-type"),
+            Bytes::from_static(b"text/html"),
+        )?;
+        map.append(
+            Bytes::from_static(b"content-type"),
+            Bytes::from_static(b"text/plain"),
+        )?;
+
+        map.insert(
+            Bytes::from_static(b"content-length"),
+            Bytes::from_static(b"123"),
+        )?;
+
+        assert_eq!(
+            map.remove(Bytes::from_static(b"content-length")),
+            Some(b"123".as_ref())
+        );
+        assert_eq!(map.get(b"content-length"), None);
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.values_count(), 2);
+
+        assert_eq!(
+            map.remove(Bytes::from_static(b"content-type")),
+            Some(b"text/html".as_ref())
+        );
+        assert_eq!(map.get(b"content-type"), None);
         assert_eq!(map.len(), 0);
-        assert_eq!(map.len_keys(), 0);
-        assert_eq!(map.inner.len(), 0);
+        assert_eq!(map.values_count(), 0);
+
+        Ok(())
     }
 
     #[test]
-    fn get_all_iteration_order_matches_insertion_order() {
+    fn get_all() -> Result<(), HeaderMapErrors> {
         let mut map = HeaderMap::new();
+        map.append(
+            Bytes::from_static(b"set-cookie"),
+            Bytes::from_static(b"cookie1=value1"),
+        )?;
+        map.append(
+            Bytes::from_static(b"set-cookie"),
+            Bytes::from_static(b"cookie2=value2"),
+        )?;
+        map.append(
+            Bytes::from_static(b"set-cookie"),
+            Bytes::from_static(b"cookie3=value3"),
+        )?;
 
-        let mut vals = map.get_all(common_headers::COOKIE).unwrap();
-        assert!(vals.next().is_none());
-
-        map.append(common_headers::COOKIE, "1").unwrap();
-        let mut vals = map.get_all(common_headers::COOKIE).unwrap();
-        assert_eq!(vals.next().unwrap().as_bytes(), b"1");
-        assert!(vals.next().is_none());
-
-        map.append(common_headers::COOKIE, "2").unwrap();
-        let mut vals = map.get_all(common_headers::COOKIE).unwrap();
-        assert_eq!(vals.next().unwrap().as_bytes(), b"1");
-        assert_eq!(vals.next().unwrap().as_bytes(), b"2");
-        assert!(vals.next().is_none());
-
-        map.append(common_headers::COOKIE, "3").unwrap();
-        map.append(common_headers::COOKIE, "4").unwrap();
-        let mut vals = map.get_all(common_headers::COOKIE).unwrap();
-        assert_eq!(vals.next().unwrap().as_bytes(), b"1");
-        assert_eq!(vals.next().unwrap().as_bytes(), b"2");
-        assert_eq!(vals.next().unwrap().as_bytes(), b"3");
-        assert_eq!(vals.next().unwrap().as_bytes(), b"4");
-        assert!(vals.next().is_none());
-
-        let t1 = map.append(common_headers::COOKIE, "too many 1".as_bytes());
-        let t2 = map.append(common_headers::COOKIE, "too many 2".as_bytes());
-        assert!(t1.is_err());
-        assert!(t2.is_err());
-
-        let _ = map.insert(common_headers::COOKIE, "5");
-        let mut vals = map.get_all(common_headers::COOKIE).unwrap();
-        assert_eq!(vals.next().unwrap().as_bytes(), b"5");
-        assert!(vals.next().is_none());
-
-        let _ = map.insert(common_headers::COOKIE, "6");
-        let _ = map.insert(common_headers::COOKIE, "7");
-        let mut vals = map.get_all(common_headers::COOKIE).unwrap();
-        assert_eq!(vals.next().unwrap().as_bytes(), b"7");
-        assert!(vals.next().is_none());
-
-        map.append(common_headers::COOKIE, "8").unwrap();
-        let mut vals = map.get_all(common_headers::COOKIE).unwrap();
-        assert_eq!(vals.next().unwrap().as_bytes(), b"7");
-        assert_eq!(vals.next().unwrap().as_bytes(), b"8");
-        assert!(vals.next().is_none());
-
-        // check for fused-ness
-        assert!(vals.next().is_none());
+        let mut values = map.get_all(b"set-cookie");
+        assert_eq!(values.next(), Some(b"cookie1=value1".as_ref()));
+        assert_eq!(values.next(), Some(b"cookie2=value2".as_ref()));
+        assert_eq!(values.next(), Some(b"cookie3=value3".as_ref()));
+        assert_eq!(values.next(), None);
+        Ok(())
     }
 
     #[test]
-    fn remove() {
+    fn iter() -> Result<(), HeaderMapErrors> {
         let mut map = HeaderMap::new();
+        map.append(
+            Bytes::from_static(b"set-cookie"),
+            Bytes::from_static(b"cookie1=value1"),
+        )?;
+        map.append(
+            Bytes::from_static(b"set-cookie"),
+            Bytes::from_static(b"cookie2=value2"),
+        )?;
+        map.append(
+            Bytes::from_static(b"set-cookie"),
+            Bytes::from_static(b"cookie3=value3"),
+        )?;
+        map.append(
+            Bytes::from_static(b"content-type"),
+            Bytes::from_static(b"text/html"),
+        )?;
+        map.append(
+            Bytes::from_static(b"content-type"),
+            Bytes::from_static(b"text/plain"),
+        )?;
+        map.append(
+            Bytes::from_static(b"content-type"),
+            Bytes::from_static(b"text/css"),
+        )?;
+        map.insert(
+            Bytes::from_static(b"content-length"),
+            Bytes::from_static(b"123"),
+        )?;
 
-        map.append(common_headers::LOCATION, "/test").unwrap();
-        map.append(common_headers::HOST, "duck.com").unwrap();
-        map.append(common_headers::HOST, "duck.com").unwrap();
-        map.append(common_headers::COOKIE, "one=1").unwrap();
-        map.append(common_headers::COOKIE, "two=2").unwrap();
-        map.append(common_headers::COOKIE, "two=3").unwrap();
+        let mut items = vec![];
 
-        assert_eq!(map.len(), 6);
-        assert_eq!(map.len_keys(), 3);
-        assert_eq!(map.inner.len(), 3);
+        for (key, value) in map.iter() {
+            items.push((
+                String::from_utf8_lossy(key).to_string(),
+                String::from_utf8_lossy(value).to_string(),
+            ));
+        }
 
-        let removed = map.remove(common_headers::HOST).unwrap().unwrap();
-
-        assert_eq!(removed.len(), 2);
-        assert_eq!(map.len(), 4);
-        assert_eq!(map.len_keys(), 2);
-        assert_eq!(map.inner.len(), 2);
-
-        let removed_val = map.remove_val(common_headers::COOKIE, 1).unwrap().unwrap();
-
-        assert_eq!(removed_val.as_bytes(), b"two=2");
         assert_eq!(map.len(), 3);
-        assert_eq!(map.len_keys(), 2);
-        assert_eq!(map.inner.len(), 2);
+        assert_eq!(map.values_count(), 7);
+        assert_eq!(items.len(), 7);
+        assert!(items.contains(&("set-cookie".into(), "cookie1=value1".into())));
+        assert!(items.contains(&("set-cookie".into(), "cookie2=value2".into())));
+        assert!(items.contains(&("set-cookie".into(), "cookie3=value3".into())));
+        assert!(items.contains(&("content-type".into(), "text/html".into())));
+        assert!(items.contains(&("content-type".into(), "text/plain".into())));
+        assert!(items.contains(&("content-type".into(), "text/css".into())));
+        assert!(items.contains(&("content-length".into(), "123".into())));
+        Ok(())
     }
 }
