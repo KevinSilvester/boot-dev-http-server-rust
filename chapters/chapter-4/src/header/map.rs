@@ -48,10 +48,6 @@ const INITIAL_CAPACITY: usize = 16;
 /// Probably not the best way to go about doing this, but it works 🤷
 const POS_HASH_EMPTY: HashSize = 0;
 
-/// The maximum distance to probe for an empty slot in the indices vector list before giving up and
-/// returning an error, None or an empty iterator.
-const MAX_PROBE_DISTANCE: usize = 8;
-
 #[derive(Debug, Clone)]
 struct Pos {
     /// The hash of the header name, used for quick comparisons during lookups and insertions.
@@ -654,7 +650,7 @@ fn ideal_pos(hash: HashSize, mask: u16) -> usize {
 mod tests {
     use rand::prelude::*;
 
-    use super::super::name::HEADER_CHARS;
+    use super::super::HEADER_CHARS;
     use super::*;
 
     #[test]

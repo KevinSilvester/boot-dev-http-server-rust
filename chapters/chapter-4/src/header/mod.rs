@@ -1,94 +1,39 @@
 mod map;
-mod name;
+pub mod common;
 
 pub use map::HeaderMap;
 
-pub use http::header::{HeaderName, HeaderValue, InvalidHeaderName, InvalidHeaderValue};
 
-pub mod common_headers {
-    #[rustfmt::skip]
-    #[allow(unused_imports)]
-    pub use http::header::{
-        ACCEPT,
-        ACCEPT_CHARSET,
-        ACCEPT_ENCODING,
-        ACCEPT_LANGUAGE,
-        ACCEPT_RANGES,
-        ACCESS_CONTROL_ALLOW_CREDENTIALS,
-        ACCESS_CONTROL_ALLOW_HEADERS,
-        ACCESS_CONTROL_ALLOW_METHODS,
-        ACCESS_CONTROL_ALLOW_ORIGIN,
-        ACCESS_CONTROL_EXPOSE_HEADERS,
-        ACCESS_CONTROL_MAX_AGE,
-        ACCESS_CONTROL_REQUEST_HEADERS,
-        ACCESS_CONTROL_REQUEST_METHOD,
-        AGE,
-        ALLOW,
-        ALT_SVC,
-        AUTHORIZATION,
-        CACHE_CONTROL,
-        CACHE_STATUS,
-        CDN_CACHE_CONTROL,
-        CONNECTION,
-        CONTENT_DISPOSITION,
-        CONTENT_ENCODING,
-        CONTENT_LANGUAGE,
-        CONTENT_LENGTH,
-        CONTENT_LOCATION,
-        CONTENT_RANGE,
-        CONTENT_SECURITY_POLICY,
-        CONTENT_SECURITY_POLICY_REPORT_ONLY,
-        CONTENT_TYPE,
-        COOKIE,
-        DNT,
-        DATE,
-        ETAG,
-        EXPECT,
-        EXPIRES,
-        FORWARDED,
-        FROM,
-        HOST,
-        IF_MATCH,
-        IF_MODIFIED_SINCE,
-        IF_NONE_MATCH,
-        IF_RANGE,
-        IF_UNMODIFIED_SINCE,
-        LAST_MODIFIED,
-        LINK,
-        LOCATION,
-        MAX_FORWARDS,
-        ORIGIN,
-        PRAGMA,
-        PROXY_AUTHENTICATE,
-        PROXY_AUTHORIZATION,
-        PUBLIC_KEY_PINS,
-        PUBLIC_KEY_PINS_REPORT_ONLY,
-        RANGE,
-        REFERER,
-        REFERRER_POLICY,
-        REFRESH,
-        RETRY_AFTER,
-        SEC_WEBSOCKET_ACCEPT,
-        SEC_WEBSOCKET_EXTENSIONS,
-        SEC_WEBSOCKET_KEY,
-        SEC_WEBSOCKET_PROTOCOL,
-        SEC_WEBSOCKET_VERSION,
-        SERVER,
-        SET_COOKIE,
-        STRICT_TRANSPORT_SECURITY,
-        TE,
-        TRAILER,
-        TRANSFER_ENCODING,
-        UPGRADE,
-        UPGRADE_INSECURE_REQUESTS,
-        USER_AGENT,
-        VARY,
-        VIA,
-        WARNING,
-        WWW_AUTHENTICATE,
-        X_CONTENT_TYPE_OPTIONS,
-        X_DNS_PREFETCH_CONTROL,
-        X_FRAME_OPTIONS,
-        X_XSS_PROTECTION,
-    };
-}
+/// Valid header name characters for HTTP/2.0 and HTTP/3.0.
+///
+/// ref: <https://github.com/hyperium/http/blob/master/src/header/name.rs#L1043>
+#[rustfmt::skip]
+pub const HEADER_CHARS: [u8; 256] = [
+    //  0      1      2      3      4      5      6      7      8      9
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, //   x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, //  1x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, //  2x
+        0,     0,     0,  b'!',  b'"',  b'#',  b'$',  b'%',  b'&', b'\'', //  3x
+        0,     0,  b'*',  b'+',     0,  b'-',  b'.',     0,  b'0',  b'1', //  4x
+     b'2',  b'3',  b'4',  b'5',  b'6',  b'7',  b'8',  b'9',     0,     0, //  5x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, //  6x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, //  7x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, //  8x
+        0,     0,     0,     0,  b'^',  b'_',  b'`',  b'a',  b'b',  b'c', //  9x
+     b'd',  b'e',  b'f',  b'g',  b'h',  b'i',  b'j',  b'k',  b'l',  b'm', // 10x
+     b'n',  b'o',  b'p',  b'q',  b'r',  b's',  b't',  b'u',  b'v',  b'w', // 11x
+     b'x',  b'y',  b'z',     0,  b'|',     0,  b'~',     0,     0,     0, // 12x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, // 13x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, // 14x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, // 15x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, // 16x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, // 17x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, // 18x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, // 19x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, // 20x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, // 21x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, // 22x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, // 23x
+        0,     0,     0,     0,     0,     0,     0,     0,     0,     0, // 24x
+        0,     0,     0,     0,     0,     0                              // 25x
+];

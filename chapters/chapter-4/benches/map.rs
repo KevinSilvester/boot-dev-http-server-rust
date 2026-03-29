@@ -6,9 +6,9 @@ use actix_http::header::{
 };
 use bytes::Bytes;
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
-use http::HeaderMap as HttpHeaderMap;
+use http::{HeaderMap as HttpHeaderMap, HeaderName, HeaderValue, header};
 
-use chapter_4::header::{HeaderMap, HeaderName, HeaderValue, common_headers};
+use chapter_4::header::HeaderMap;
 
 const HOST_VALUE_1_STR: &str = "example.com";
 const HOST_VALUE_2_STR: &str = "example.org";
@@ -26,7 +26,7 @@ const ORIGIN_VALUE_1_STR: &str = "https://example.com";
 mod http_headers {
     use super::*;
 
-    // pub const HOST_KEY: HeaderName = common_headers::HOST;
+    // pub const HOST_KEY: HeaderName = headers::HOST;
     pub const HOST_KEY: HeaderName = HeaderName::from_static("host");
     pub const HOST_VALUE_1: HeaderValue = HeaderValue::from_static(HOST_VALUE_1_STR);
     pub const HOST_VALUE_2: HeaderValue = HeaderValue::from_static(HOST_VALUE_2_STR);
@@ -743,7 +743,7 @@ fn map_iter(c: &mut Criterion) {
             BatchSize::LargeInput,
         )
     });
-    
+
     group.bench_function("ActixHeaderMap - iter", |b| {
         b.iter_batched(
             || {
@@ -790,7 +790,6 @@ fn map_iter(c: &mut Criterion) {
             BatchSize::LargeInput,
         )
     });
-
 
     group.finish();
 }
