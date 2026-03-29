@@ -199,7 +199,7 @@ fn map_insert(c: &mut Criterion) {
             BatchSize::SmallInput,
         )
     });
-    group.bench_function("HeaderMap2 - insert", |b| {
+    group.bench_function("CustomHeaderMap - insert", |b| {
         b.iter_batched_ref(
             HeaderMap::new,
             |map| {
@@ -278,7 +278,7 @@ fn map_insert_many(c: &mut Criterion) {
         );
     });
 
-    group.bench_function("HeaderMap2 - insert many", |b| {
+    group.bench_function("CustomHeaderMap - insert many", |b| {
         b.iter_batched_ref(
             || {
                 let mut headers = vec![];
@@ -391,7 +391,7 @@ fn map_append(c: &mut Criterion) {
             BatchSize::SmallInput,
         )
     });
-    group.bench_function("HeaderMap2 - append", |b| {
+    group.bench_function("CustomHeaderMap - append", |b| {
         b.iter_batched_ref(
             HeaderMap::new,
             |map| {
@@ -500,7 +500,7 @@ fn map_get(c: &mut Criterion) {
         )
     });
 
-    group.bench_function("HeaderMap2 - get", |b| {
+    group.bench_function("CustomHeaderMap - get", |b| {
         b.iter_batched(
             || {
                 let mut map = HeaderMap::new();
@@ -590,7 +590,7 @@ fn map_get_all(c: &mut Criterion) {
         )
     });
 
-    group.bench_function("HeaderMap2 - get_all", |b| {
+    group.bench_function("CustomHeaderMap - get_all", |b| {
         b.iter_batched(
             || {
                 let mut map = HeaderMap::new();
@@ -627,12 +627,182 @@ fn map_get_all(c: &mut Criterion) {
     group.finish();
 }
 
+fn map_remove(c: &mut Criterion) {
+    let mut group = c.benchmark_group("map-remove");
+
+    group.bench_function("HttpHeaderMap - remove", |b| {
+        b.iter_batched(
+            || {
+                let mut map = HttpHeaderMap::new();
+                map.append(http_headers::HOST_KEY, http_headers::HOST_VALUE_1);
+                map.append(http_headers::HOST_KEY, http_headers::HOST_VALUE_2);
+                map.append(http_headers::ACCEPT_KEY, http_headers::ACCEPT_VALUE_1);
+                map.append(http_headers::ACCEPT_KEY, http_headers::ACCEPT_VALUE_2);
+                map.append(http_headers::COOKIE_KEY, http_headers::COOKIE_VALUE_1);
+                map.append(http_headers::COOKIE_KEY, http_headers::COOKIE_VALUE_2);
+                map.append(http_headers::COOKIE_KEY, http_headers::COOKIE_VALUE_3);
+                map.append(http_headers::COOKIE_KEY, http_headers::COOKIE_VALUE_4);
+                map.append(http_headers::ORIGIN_KEY, http_headers::ORIGIN_VALUE_1);
+                map
+            },
+            |mut map| {
+                black_box(map.remove(http_headers::HOST_KEY).unwrap());
+                black_box(map.remove(http_headers::ACCEPT_KEY).unwrap());
+                black_box(map.remove(http_headers::COOKIE_KEY).unwrap());
+                black_box(map.remove(http_headers::ORIGIN_KEY).unwrap());
+            },
+            BatchSize::LargeInput,
+        )
+    });
+
+    group.bench_function("ActixHeaderMap - remove", |b| {
+        b.iter_batched(
+            || {
+                let mut map = ActixHeaderMap::new();
+                map.append(actix_headers::HOST_KEY, actix_headers::HOST_VALUE_1);
+                map.append(actix_headers::HOST_KEY, actix_headers::HOST_VALUE_2);
+                map.append(actix_headers::ACCEPT_KEY, actix_headers::ACCEPT_VALUE_1);
+                map.append(actix_headers::ACCEPT_KEY, actix_headers::ACCEPT_VALUE_2);
+                map.append(actix_headers::COOKIE_KEY, actix_headers::COOKIE_VALUE_1);
+                map.append(actix_headers::COOKIE_KEY, actix_headers::COOKIE_VALUE_2);
+                map.append(actix_headers::COOKIE_KEY, actix_headers::COOKIE_VALUE_3);
+                map.append(actix_headers::COOKIE_KEY, actix_headers::COOKIE_VALUE_4);
+                map.append(actix_headers::ORIGIN_KEY, actix_headers::ORIGIN_VALUE_1);
+                map
+            },
+            |mut map| {
+                black_box(map.remove(actix_headers::HOST_KEY));
+                black_box(map.remove(actix_headers::ACCEPT_KEY));
+                black_box(map.remove(actix_headers::COOKIE_KEY));
+                black_box(map.remove(actix_headers::ORIGIN_KEY));
+            },
+            BatchSize::LargeInput,
+        )
+    });
+
+    group.bench_function("CustomHeaderMap - remove", |b| {
+        b.iter_batched(
+            || {
+                let mut map = HeaderMap::new();
+                map.append(static_headers::HOST_KEY, static_headers::HOST_VALUE_1)
+                    .unwrap();
+                map.append(static_headers::HOST_KEY, static_headers::HOST_VALUE_2)
+                    .unwrap();
+                map.append(static_headers::ACCEPT_KEY, static_headers::ACCEPT_VALUE_1)
+                    .unwrap();
+                map.append(static_headers::ACCEPT_KEY, static_headers::ACCEPT_VALUE_2)
+                    .unwrap();
+                map.append(static_headers::COOKIE_KEY, static_headers::COOKIE_VALUE_1)
+                    .unwrap();
+                map.append(static_headers::COOKIE_KEY, static_headers::COOKIE_VALUE_2)
+                    .unwrap();
+                map.append(static_headers::COOKIE_KEY, static_headers::COOKIE_VALUE_3)
+                    .unwrap();
+                map.append(static_headers::COOKIE_KEY, static_headers::COOKIE_VALUE_4)
+                    .unwrap();
+                map.append(static_headers::ORIGIN_KEY, static_headers::ORIGIN_VALUE_1)
+                    .unwrap();
+                map
+            },
+            |mut map| {
+                black_box(map.remove(&static_headers::HOST_KEY).unwrap());
+                black_box(map.remove(&static_headers::ACCEPT_KEY).unwrap());
+                black_box(map.remove(&static_headers::COOKIE_KEY).unwrap());
+                black_box(map.remove(&static_headers::ORIGIN_KEY).unwrap());
+            },
+            BatchSize::LargeInput,
+        )
+    });
+
+    group.finish();
+}
+
+fn map_iter(c: &mut Criterion) {
+    let mut group = c.benchmark_group("map-iter");
+
+    group.bench_function("HttpHeaderMap - iter", |b| {
+        b.iter_batched(
+            || {
+                let mut map = HttpHeaderMap::new();
+
+                for i in 0..600 {
+                    for j in 0..10 {
+                        map.append(
+                            HeaderName::from_str(&format!("header-{i}")).unwrap(),
+                            HeaderValue::from_str(&format!("value-{j}")).unwrap(),
+                        );
+                    }
+                }
+                map
+            },
+            |map| {
+                for (name, value) in black_box(map.iter()) {
+                    black_box((name, value));
+                }
+            },
+            BatchSize::LargeInput,
+        )
+    });
+    
+    group.bench_function("ActixHeaderMap - iter", |b| {
+        b.iter_batched(
+            || {
+                let mut map = ActixHeaderMap::new();
+                for i in 0..600 {
+                    for j in 0..10 {
+                        map.append(
+                            ActixHeaderName::from_str(&format!("header-{i}")).unwrap(),
+                            ActixHeaderValue::from_str(&format!("value-{j}")).unwrap(),
+                        );
+                    }
+                }
+                map
+            },
+            |map| {
+                for (name, value) in black_box(map.iter()) {
+                    black_box((name, value));
+                }
+            },
+            BatchSize::LargeInput,
+        )
+    });
+
+    group.bench_function("CustomHeaderMap - iter", |b| {
+        b.iter_batched(
+            || {
+                let mut map = HeaderMap::new();
+                for i in 0..600 {
+                    for j in 0..10 {
+                        map.append(
+                            Bytes::copy_from_slice(format!("header-{i}").as_bytes()),
+                            Bytes::copy_from_slice(format!("value-{j}").as_bytes()),
+                        )
+                        .unwrap();
+                    }
+                }
+                map
+            },
+            |map| {
+                for (name, value) in black_box(map.iter()) {
+                    black_box((name, value));
+                }
+            },
+            BatchSize::LargeInput,
+        )
+    });
+
+
+    group.finish();
+}
+
 const WARMUP: Duration = Duration::from_millis(1000);
 const MTIME: Duration = Duration::from_millis(5000);
 const SAMPLES: usize = 1000;
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(SAMPLES).warm_up_time(WARMUP).measurement_time(MTIME);
-    targets = map_insert, map_insert_many, map_append, map_get, map_get_all
+    targets = map_insert, map_insert_many, map_append, map_get, map_iter, map_remove
+    // targets = map_insert, map_insert_many, map_append, map_get, map_iter
+    // targets = map_remove
 }
 criterion_main!(benches);

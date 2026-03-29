@@ -21,7 +21,11 @@ use std::mem;
 use bytes::Bytes;
 // use http::HeaderMap;
 use rapidhash::v3::rapidhash_v3;
+use smallvec::{SmallVec, smallvec};
 use thiserror::Error;
+
+type HashSize = u32;
+type IndexSize = u16;
 
 /// The load-factor threshold is effectively the maximum percentage of the entries the map can be filled
 /// before it needs to grow the capacity and rehash the entries.
@@ -42,33 +46,40 @@ const INITIAL_CAPACITY: usize = 16;
 
 /// Placeholder hash value to indicate an empty slot in the indices vector list.
 /// Probably not the best way to go about doing this, but it works 🤷
-const POS_HASH_EMPTY: u64 = !0;
+const POS_HASH_EMPTY: HashSize = 0;
 
 /// The maximum distance to probe for an empty slot in the indices vector list before giving up and
 /// returning an error, None or an empty iterator.
-const MAX_PROBE_DISTANCE: usize = 5;
+const MAX_PROBE_DISTANCE: usize = 8;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Pos {
     /// The hash of the header name, used for quick comparisons during lookups and insertions.
-    hash: u64,
+    hash: HashSize,
 
     /// The index of the corresponding bucket in the entries vector list, where the header value is
     /// stored
-    index: usize,
+    entry_idx: IndexSize,
+
+    /// The ideal index of pos within the indices
+    ideal_pos: IndexSize,
 }
 
 impl Pos {
     #[inline]
-    pub fn new(hash: u64, index: usize) -> Self {
-        Self { hash, index }
+    pub fn new(hash: HashSize, entry_idx: IndexSize, ideal_pos: IndexSize) -> Self {
+        Self {
+            hash,
+            entry_idx,
+            ideal_pos,
+        }
     }
-
     #[inline]
     pub fn empty() -> Self {
         Self {
             hash: POS_HASH_EMPTY,
-            index: 0,
+            entry_idx: 0,
+            ideal_pos: 0,
         }
     }
 
@@ -106,9 +117,6 @@ struct Bucket {
 pub enum HeaderMapErrors {
     #[error("HeaderMap has reached max capacity")]
     MaxCapacityReached,
-
-    #[error("Map probing limit exceeded")]
-    ProbeLimitExceeded,
 }
 
 /// An iterator over the values of a header
@@ -185,19 +193,19 @@ impl<'a> Iterator for MapIter<'a> {
 
         match self.value_iter.as_mut().and_then(|iter| iter.next()) {
             Some(value) => {
-                let pos = self.map.indices[self.index];
-                let bucket = &self.map.entries[pos.index];
+                let pos = &self.map.indices[self.index];
+                let bucket = &self.map.entries[pos.entry_idx as usize];
                 return Some((bucket.key.as_ref(), value));
             }
-            None => self.index += 1
+            None => self.index += 1,
         }
 
         while self.map.indices[self.index].is_empty() {
             self.index += 1;
         }
 
-        let pos = self.map.indices[self.index];
-        let bucket = &self.map.entries[pos.index];
+        let pos = &self.map.indices[self.index];
+        let bucket = &self.map.entries[pos.entry_idx as usize];
 
         self.value_iter = Some(ValueIter::new(
             self.map,
@@ -223,6 +231,7 @@ pub struct HeaderMap {
     indices: Box<[Pos]>,
     entries: Vec<Bucket>,
     extra_values: Vec<ExtraValue>,
+    vacant_entries: SmallVec<[usize; 4]>,
 }
 
 impl HeaderMap {
@@ -231,13 +240,14 @@ impl HeaderMap {
     #[inline]
     pub fn new() -> Self {
         Self {
-            mask: 0,
+            mask: (INITIAL_CAPACITY - 1) as u16,
             size: 0,
-            capactiy: 0,
+            capactiy: INITIAL_CAPACITY,
             values_count: 0,
-            indices: Box::new([]),
-            entries: Vec::new(),
-            extra_values: Vec::new(),
+            indices: vec![Pos::empty(); INITIAL_CAPACITY].into_boxed_slice(),
+            entries: vec![],
+            extra_values: vec![],
+            vacant_entries: smallvec![],
         }
     }
 
@@ -267,53 +277,62 @@ impl HeaderMap {
         self.ensure_capacity()?;
 
         let hash = hash_key(&key);
-        let mut probe = ideal_pos(hash, self.mask);
-        let mut distance = 0;
+        let ideal_pos = ideal_pos(hash, self.mask);
+        let mut probe = ideal_pos;
 
         while !self.indices[probe].is_empty() {
-            if distance > MAX_PROBE_DISTANCE {
-                return Err(HeaderMapErrors::ProbeLimitExceeded);
-            }
-
             if self.indices[probe].hash == hash {
                 break;
             }
             probe = (probe + 1) & self.mask as usize;
-            distance += 1;
         }
 
-        let old_value = match self.indices[probe].is_empty() {
-            true => {
-                self.indices[probe] = Pos::new(hash, self.entries.len());
-                self.entries.push(Bucket {
-                    key,
-                    value,
-                    overflow: None,
-                    overflow_count: 0,
-                });
-                self.size += 1;
-                self.values_count += 1;
-                None
+        if self.indices[probe].is_empty() {
+            match self.vacant_entries.pop() {
+                Some(idx) => {
+                    self.indices[probe] = Pos::new(
+                        hash,
+                        self.entries.len() as IndexSize,
+                        ideal_pos as IndexSize,
+                    );
+                    self.entries[idx] = Bucket {
+                        key,
+                        value,
+                        overflow: None,
+                        overflow_count: 0,
+                    };
+                }
+                None => {
+                    self.indices[probe] = Pos::new(
+                        hash,
+                        self.entries.len() as IndexSize,
+                        ideal_pos as IndexSize,
+                    );
+                    self.entries.push(Bucket {
+                        key,
+                        value,
+                        overflow: None,
+                        overflow_count: 0,
+                    });
+                }
             }
-            false => {
-                let pos = self.indices[probe];
-                let mut new_bucket = Bucket {
-                    key,
-                    value,
-                    overflow: None,
-                    overflow_count: 0,
-                };
-                let old_bucket = &mut self.entries[pos.index];
-                self.values_count -= old_bucket.overflow_count;
-                mem::swap(old_bucket, &mut new_bucket);
-                Some(new_bucket.value)
-            }
+            self.size += 1;
+            self.values_count += 1;
+            return Ok(None);
+        }
+
+        let pos = &self.indices[probe];
+        let mut new_bucket = Bucket {
+            key,
+            value,
+            overflow: None,
+            overflow_count: 0,
         };
+        let old_bucket = &mut self.entries[pos.entry_idx as usize];
+        self.values_count -= old_bucket.overflow_count;
+        mem::swap(old_bucket, &mut new_bucket);
 
-        debug_assert!(self.size > 0);
-        debug_assert!(self.size < self.capactiy);
-
-        Ok(old_value)
+        Ok(Some(new_bucket.value))
     }
 
     /// Gets the first value associated with the given key, if it exists.
@@ -324,18 +343,12 @@ impl HeaderMap {
 
         let hash = hash_key(key);
         let mut probe = ideal_pos(hash, self.mask);
-        let mut distance = 0;
 
         while !self.indices[probe].is_empty() {
-            if distance > MAX_PROBE_DISTANCE {
-                return None;
-            }
-
             if self.indices[probe].hash == hash {
-                return Some(&self.entries[self.indices[probe].index].value);
+                return Some(&self.entries[self.indices[probe].entry_idx as usize].value);
             }
             probe = (probe + 1) & self.mask as usize;
-            distance += 1;
         }
         None
     }
@@ -348,17 +361,12 @@ impl HeaderMap {
 
         let hash = hash_key(key);
         let mut probe = ideal_pos(hash, self.mask);
-        let mut distance = 0;
 
         while !self.indices[probe].is_empty() {
-            if distance > MAX_PROBE_DISTANCE {
-                return None;
-            }
             if self.indices[probe].hash == hash {
-                return Some(&mut self.entries[self.indices[probe].index].value);
+                return Some(&mut self.entries[self.indices[probe].entry_idx as usize].value);
             }
             probe = (probe + 1) & self.mask as usize;
-            distance += 1;
         }
         None
     }
@@ -369,36 +377,52 @@ impl HeaderMap {
         self.ensure_capacity()?;
 
         let hash = hash_key(&key);
-        let mut probe = ideal_pos(hash, self.mask);
-        let mut distance = 0;
+        let ideal_pos = ideal_pos(hash, self.mask);
+        let mut probe = ideal_pos;
 
         while !self.indices[probe].is_empty() {
-            if distance > MAX_PROBE_DISTANCE {
-                return Err(HeaderMapErrors::ProbeLimitExceeded);
-            }
-
             if self.indices[probe].hash == hash {
                 break;
             }
             probe = (probe + 1) & self.mask as usize;
-            distance += 1;
         }
 
         if self.indices[probe].is_empty() {
-            self.indices[probe] = Pos::new(hash, self.entries.len());
-            self.entries.push(Bucket {
-                key,
-                value,
-                overflow: None,
-                overflow_count: 0,
-            });
+            match self.vacant_entries.pop() {
+                Some(idx) => {
+                    self.indices[probe] = Pos::new(
+                        hash,
+                        self.entries.len() as IndexSize,
+                        ideal_pos as IndexSize,
+                    );
+                    self.entries[idx] = Bucket {
+                        key,
+                        value,
+                        overflow: None,
+                        overflow_count: 0,
+                    };
+                }
+                None => {
+                    self.indices[probe] = Pos::new(
+                        hash,
+                        self.entries.len() as IndexSize,
+                        ideal_pos as IndexSize,
+                    );
+                    self.entries.push(Bucket {
+                        key,
+                        value,
+                        overflow: None,
+                        overflow_count: 0,
+                    });
+                }
+            }
             self.size += 1;
             self.values_count += 1;
             return Ok(());
         }
 
-        let pos = self.indices[probe];
-        let bucket = &mut self.entries[pos.index];
+        let pos = &self.indices[probe];
+        let bucket = &mut self.entries[pos.entry_idx as usize];
         let mut new_extra = ExtraValue {
             value,
             next: None,
@@ -436,34 +460,43 @@ impl HeaderMap {
     }
 
     /// Removes the values associated with the given key and returns the first value if it exists.
-    pub fn remove(&mut self, key: Bytes) -> Option<&[u8]> {
-        let hash = hash_key(&key);
-        let mut probe = ideal_pos(hash, self.mask);
-        let mut distance = 0;
+    pub fn remove(&mut self, key: &[u8]) -> Option<&[u8]> {
+        let hash = hash_key(key);
+        let ideal_pos = ideal_pos(hash, self.mask);
+        let mut probe = ideal_pos;
+
+        if self.indices[probe].is_empty() {
+            return None;
+        }
 
         while !self.indices[probe].is_empty() {
-            if distance > MAX_PROBE_DISTANCE {
-                return None;
-            }
-
             if self.indices[probe].hash == hash {
                 break;
             }
             probe = (probe + 1) & self.mask as usize;
-            distance += 1;
         }
 
-        let pos = self.indices[probe];
+        let pos = &self.indices[probe];
+        let bucket = &self.entries[pos.entry_idx as usize];
 
-        if pos.is_empty() {
-            return None;
-        }
-
-        let bucket = &mut self.entries[pos.index];
-
-        self.indices[probe] = Pos::empty();
         self.size -= 1;
         self.values_count -= 1 + bucket.overflow_count;
+        self.vacant_entries.push(pos.entry_idx as usize);
+        self.indices[probe] = Pos::empty();
+
+        probe = (probe + 1) & self.mask as usize;
+
+        while !self.indices[probe].is_empty() {
+            // if this value's ideal_pos is the same as probe, it doesn't need to be shifted back.
+            if self.indices[probe].ideal_pos as usize == probe {
+                break;
+            }
+
+            let prev = (probe - 1) & self.mask as usize;
+            self.indices.swap(prev, probe);
+            probe = (probe + 1) & self.mask as usize;
+        }
+
         Some(&bucket.value)
     }
 
@@ -496,17 +529,14 @@ impl HeaderMap {
 
         let hash = hash_key(key);
         let mut probe = ideal_pos(hash, self.mask);
-        let mut distance = 0;
 
         while !self.indices[probe].is_empty() {
-            if distance > MAX_PROBE_DISTANCE {
-                return None;
-            }
             if self.indices[probe].hash == hash {
-                return Some(self.entries[self.indices[probe].index].overflow_count > 0);
+                return Some(
+                    self.entries[self.indices[probe].entry_idx as usize].overflow_count > 0,
+                );
             }
             probe = (probe + 1) & self.mask as usize;
-            distance += 1;
         }
         Some(false)
     }
@@ -519,25 +549,20 @@ impl HeaderMap {
 
         let hash = hash_key(key);
         let mut probe = ideal_pos(hash, self.mask);
-        let mut distance = 0;
 
         while !self.indices[probe].is_empty() {
-            if distance > MAX_PROBE_DISTANCE {
-                return ValueIter::new(self, None, None);
-            }
             if self.indices[probe].hash == hash {
                 break;
             }
             probe = (probe + 1) & self.mask as usize;
-            distance += 1;
         }
 
-        let pos = self.indices[probe];
+        let pos = &self.indices[probe];
         if pos.is_empty() {
             return ValueIter::new(self, None, None);
         }
 
-        let bucket = &self.entries[pos.index];
+        let bucket = &self.entries[pos.entry_idx as usize];
         ValueIter::new(
             self,
             Some(&bucket.value),
@@ -586,18 +611,21 @@ impl HeaderMap {
                 break;
             }
 
-            let pos = self.indices[idx];
+            let pos = &self.indices[idx];
             if pos.is_empty() {
                 idx += 1;
                 continue;
             }
 
-            let mut probe = ideal_pos(pos.hash, self.mask);
+            let ideal_pos = ideal_pos(pos.hash, self.mask);
+            let mut probe = ideal_pos;
+
             while !new_indices[probe].is_empty() {
                 probe = (probe + 1) & self.mask as usize;
             }
 
-            new_indices[probe] = self.indices[idx];
+            mem::swap(&mut new_indices[probe], &mut self.indices[idx]);
+            new_indices[probe].ideal_pos = ideal_pos as IndexSize;
 
             idx += 1;
         }
@@ -610,20 +638,23 @@ impl HeaderMap {
 }
 
 #[inline]
-fn hash_key(key: &[u8]) -> u64 {
+fn hash_key(key: &[u8]) -> HashSize {
     // let mut hasher = GxHasher::default();
     // hasher.write(key);
     // hasher.finish()
-    rapidhash_v3(key)
+    rapidhash_v3(key) as HashSize
 }
 
 #[inline]
-fn ideal_pos(hash: u64, mask: u16) -> usize {
-    (hash & (mask as u64)) as usize
+fn ideal_pos(hash: HashSize, mask: u16) -> usize {
+    (hash & mask as HashSize) as usize
 }
 
 #[cfg(test)]
 mod tests {
+    use rand::prelude::*;
+
+    use super::super::name::HEADER_CHARS;
     use super::*;
 
     #[test]
@@ -737,13 +768,14 @@ mod tests {
 
         let mut map = HeaderMap::new();
         for (key, value) in headers.iter() {
-            if map
-                .insert(
-                    Bytes::copy_from_slice(key.as_bytes()),
-                    Bytes::copy_from_slice(value.as_bytes()),
-                )?
-                .is_some()
-            {
+            let ins = map.insert(
+                Bytes::copy_from_slice(key.as_bytes()),
+                Bytes::copy_from_slice(value.as_bytes()),
+            )?;
+            if ins.is_some() {
+                dbg!(&map.indices);
+                dbg!(&map.entries);
+                dbg!(&key, &value, ins);
                 panic!("Expected None, got Some")
             }
         }
@@ -913,7 +945,15 @@ mod tests {
     fn remove() -> Result<(), HeaderMapErrors> {
         let mut map = HeaderMap::new();
 
-        map.insert(
+        map.append(
+            Bytes::from_static(b"host"),
+            Bytes::from_static(b"example.com"),
+        )?;
+        map.append(
+            Bytes::from_static(b"host"),
+            Bytes::from_static(b"example.org"),
+        )?;
+        map.append(
             Bytes::from_static(b"content-type"),
             Bytes::from_static(b"text/html"),
         )?;
@@ -921,28 +961,55 @@ mod tests {
             Bytes::from_static(b"content-type"),
             Bytes::from_static(b"text/plain"),
         )?;
-
+        map.append(
+            Bytes::from_static(b"content-type"),
+            Bytes::from_static(b"text/css"),
+        )?;
         map.insert(
             Bytes::from_static(b"content-length"),
             Bytes::from_static(b"123"),
         )?;
 
-        assert_eq!(
-            map.remove(Bytes::from_static(b"content-length")),
-            Some(b"123".as_ref())
-        );
-        assert_eq!(map.get(b"content-length"), None);
-        assert_eq!(map.len(), 1);
-        assert_eq!(map.values_count(), 2);
-
-        assert_eq!(
-            map.remove(Bytes::from_static(b"content-type")),
-            Some(b"text/html".as_ref())
-        );
+        assert_eq!(map.remove(b"content-type"), Some(b"text/html".as_ref()));
         assert_eq!(map.get(b"content-type"), None);
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.values_count(), 3);
+
+        assert_eq!(map.remove(b"host"), Some(b"example.com".as_ref()));
+        assert_eq!(map.get(b"host"), None);
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.values_count(), 1);
+
+        assert_eq!(map.remove(b"content-length"), Some(b"123".as_ref()));
+        assert_eq!(map.get(b"content-length"), None);
         assert_eq!(map.len(), 0);
         assert_eq!(map.values_count(), 0);
 
+        Ok(())
+    }
+
+    #[test]
+    fn remove_clustered() -> Result<(), HeaderMapErrors> {
+        let mut map = HeaderMap::new();
+
+        // The ideal position for both keys will be 2 when the map capacity is 16
+        map.insert(
+            Bytes::from_static(b"key--1"),
+            Bytes::from_static(b"value-1"),
+        )?;
+        map.insert(
+            Bytes::from_static(b"key--2"),
+            Bytes::from_static(b"value-2"),
+        )?;
+
+        assert_eq!(map.remove(b"key--1"), Some(b"value-1".as_ref()));
+        assert_eq!(map.get(b"key--1"), None);
+
+        assert_eq!(map.remove(b"key--2"), Some(b"value-2".as_ref()));
+        assert_eq!(map.get(b"key--2"), None);
+
+        assert_eq!(map.len(), 0);
+        assert_eq!(map.values_count(), 0);
         Ok(())
     }
 
@@ -1021,6 +1088,70 @@ mod tests {
         assert!(items.contains(&("content-type".into(), "text/plain".into())));
         assert!(items.contains(&("content-type".into(), "text/css".into())));
         assert!(items.contains(&("content-length".into(), "123".into())));
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "This test is non-deterministic and is meant to be run multiple times to catch edge cases in the implementation"]
+    fn insert_random() -> Result<(), HeaderMapErrors> {
+        let mut rng = rand::rng();
+
+        for _ in 0..20 {
+            let mut map = HeaderMap::new();
+            let mut headers = vec![];
+
+            for _ in 0..HeaderMap::MAX_SIZE {
+                let key_len = rng.random_range(1..=20);
+                let val_len = rng.random_range(1..=100);
+
+                let mut key = vec![];
+                let mut val = vec![];
+
+                while key.len() < key_len {
+                    let idx = rng.random_range(0..HEADER_CHARS.len());
+                    let ch = HEADER_CHARS[idx];
+                    if ch != 0 {
+                        key.push(ch);
+                    }
+                }
+
+                while val.len() < val_len {
+                    let idx = rng.random_range(0..HEADER_CHARS.len());
+                    let ch = HEADER_CHARS[idx];
+                    if ch != 0 {
+                        val.push(ch);
+                    }
+                }
+
+                headers.push((key, val));
+            }
+            for (key, val) in headers.iter() {
+                let count = headers.iter().filter(|&(k, _)| k == key).count();
+                let contains = map.contains_key(key.as_ref());
+
+                let key = Bytes::copy_from_slice(key.as_ref());
+                let val = Bytes::copy_from_slice(val.as_ref());
+                let ins = map.insert(key.clone(), val.clone())?;
+
+                if count > 0 && contains {
+                    if ins.is_none() {
+                        dbg!(&map.indices);
+                        dbg!(&map.entries);
+                        dbg!(&key, &val, ins);
+                        panic!("Expected Some, got None")
+                    }
+                    // assert!(ins.is_some());
+                } else {
+                    if ins.is_some() {
+                        dbg!(&map.indices);
+                        dbg!(&map.entries);
+                        dbg!(&key, &val, ins);
+                        panic!("Expected None, got Some")
+                    }
+                    // assert!(ins.is_none());
+                }
+            }
+        }
         Ok(())
     }
 }
