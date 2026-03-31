@@ -1,5 +1,6 @@
 use anyhow::Context;
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
+use http::request::Parts;
 use thiserror::Error;
 
 use super::line::{HttpVersion, RequestLine, RequestMethod};
@@ -94,6 +95,10 @@ impl RequestParser {
 
     pub fn done(&self) -> bool {
         matches!(self.state, RequestParserState::Done)
+    }
+
+    fn parse_request_target(line: &[u8]) -> anyhow::Result<Bytes> {
+        unimplemented!()
     }
 
     fn parse_request_line(line: &[u8]) -> anyhow::Result<RequestLine> {

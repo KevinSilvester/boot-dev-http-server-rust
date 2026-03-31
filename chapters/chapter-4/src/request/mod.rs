@@ -8,6 +8,4 @@ pub use self::parser::RequestParser;
 #[derive(Debug)]
 pub struct Request {}
 
-impl Request {
-}
-
+impl Request {}

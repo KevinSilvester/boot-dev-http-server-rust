@@ -2,7 +2,7 @@
 //! ref:
 //!   - <https://github.com/hyperium/http/blob/master/src/header/name.rs#L156>
 //!   - <https://github.com/actix/actix-web/blob/main/actix-http/src/header/common.rs>
-   
+
 use bytes::Bytes;
 
 macro_rules! headers {
@@ -222,7 +222,7 @@ headers! {
     ///
     /// See [RFC 9213](https://www.rfc-editor.org/rfc/rfc9213.html).
     (CDN_CACHE_CONTROL, b"cdn-cache-control");
-    
+
     /// Response header field that sends a signal to the user agent that it ought to remove all data of
     /// a certain set of types.
     ///

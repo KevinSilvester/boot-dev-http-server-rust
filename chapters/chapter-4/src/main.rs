@@ -8,11 +8,9 @@ mod utils;
 use smol::io::AsyncWriteExt;
 use smol::net::TcpListener;
 
-
 use crate::config::ServerConfigBuilder;
 use crate::connection::handle_connections;
 use crate::request::Request;
-
 
 fn main() -> anyhow::Result<()> {
     let config = ServerConfigBuilder::new().build();

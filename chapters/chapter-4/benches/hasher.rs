@@ -1,4 +1,4 @@
-use std::hash::{Hasher, DefaultHasher};
+use std::hash::{DefaultHasher, Hasher};
 use std::hint::black_box;
 use std::time::Duration;
 
@@ -57,9 +57,7 @@ fn hash_compare(c: &mut Criterion) {
 
     // c.bench_function("fnv_hash", |b| b.iter(|| hash_with_fnv(black_box(&data))));
     c.bench_function("rapid_hash", |b| b.iter(|| rapidhash_v3(&data)));
-    c.bench_function("gxhash_hash", |b| {
-        b.iter(|| hash_with_gxhash(&data))
-    });
+    c.bench_function("gxhash_hash", |b| b.iter(|| hash_with_gxhash(&data)));
     // c.bench_function("default_hash", |b| {
     //     b.iter(|| hash_with_default(black_box(&data)))
     // });

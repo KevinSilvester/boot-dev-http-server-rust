@@ -15,11 +15,16 @@
 //! ```
 //! In this server implementation, comma separated values will be treated as a single value, and
 //! multiple lines with the same header name will be treated as multiple values.
+//!
+//! Unlike the `http` crate, this implementation does not check for illegal bytes/characters in the header names or values upon insertion,
+//! and assumes that the input is always valid.
+//!
+//! Additionally, this implementation does not support case-insensitive header names, and treats header names as case-sensitive.
+//! So they will be stored and looked up as-is, without any normalization or conversion to lowercase.
 
 use std::mem;
 
 use bytes::Bytes;
-// use http::HeaderMap;
 use rapidhash::v3::rapidhash_v3;
 use smallvec::{SmallVec, smallvec};
 use thiserror::Error;
@@ -218,6 +223,20 @@ impl<'a> Iterator for MapIter<'a> {
     }
 }
 
+/// A simplified version of `HeaderMap` implemented in the `http` crate
+/// A multi-map of header-names (`Bytes`) to one or more header-values (`Bytes`).
+///
+/// Example usage:
+/// ```rust
+/// use bytes::Bytes;
+/// let mut map = HeaderMap::new();
+///
+/// map.insert(Bytes::from_static(b"content-type"), Bytes::from_static(b"text/html")).unwrap();
+/// assert_eq!(map.get(b"content-type"), Some(b"text/html".as_ref()));
+///
+/// map.append(Bytes::from_static(b"content-type"), Bytes::from_static(b"text/plain")).unwrap();
+/// assert_eq!(map.get_all(b"content-type").collect::<Vec<_>>(), vec![b"text/html".as_ref(), b"text/plain".as_ref()]);
+/// ```
 #[derive(Debug, Default)]
 pub struct HeaderMap {
     mask: u16,
@@ -284,34 +303,27 @@ impl HeaderMap {
         }
 
         if self.indices[probe].is_empty() {
-            match self.vacant_entries.pop() {
+            let idx = match self.vacant_entries.pop() {
                 Some(idx) => {
-                    self.indices[probe] = Pos::new(
-                        hash,
-                        self.entries.len() as IndexSize,
-                        ideal_pos as IndexSize,
-                    );
                     self.entries[idx] = Bucket {
                         key,
                         value,
                         overflow: None,
                         overflow_count: 0,
                     };
+                    idx
                 }
                 None => {
-                    self.indices[probe] = Pos::new(
-                        hash,
-                        self.entries.len() as IndexSize,
-                        ideal_pos as IndexSize,
-                    );
                     self.entries.push(Bucket {
                         key,
                         value,
                         overflow: None,
                         overflow_count: 0,
                     });
+                    self.entries.len() - 1
                 }
-            }
+            };
+            self.indices[probe] = Pos::new(hash, idx as IndexSize, ideal_pos as IndexSize);
             self.size += 1;
             self.values_count += 1;
             return Ok(None);
@@ -384,34 +396,29 @@ impl HeaderMap {
         }
 
         if self.indices[probe].is_empty() {
-            match self.vacant_entries.pop() {
+            let idx = match self.vacant_entries.pop() {
                 Some(idx) => {
-                    self.indices[probe] = Pos::new(
-                        hash,
-                        self.entries.len() as IndexSize,
-                        ideal_pos as IndexSize,
-                    );
                     self.entries[idx] = Bucket {
                         key,
                         value,
                         overflow: None,
                         overflow_count: 0,
                     };
+                    idx
                 }
                 None => {
-                    self.indices[probe] = Pos::new(
-                        hash,
-                        self.entries.len() as IndexSize,
-                        ideal_pos as IndexSize,
-                    );
                     self.entries.push(Bucket {
                         key,
                         value,
                         overflow: None,
                         overflow_count: 0,
                     });
+                    self.entries.len() - 1
                 }
-            }
+            };
+
+            self.indices[probe] = Pos::new(hash, idx as IndexSize, ideal_pos as IndexSize);
+
             self.size += 1;
             self.values_count += 1;
             return Ok(());

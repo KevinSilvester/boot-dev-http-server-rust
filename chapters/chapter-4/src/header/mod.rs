@@ -1,8 +1,7 @@
-mod map;
 pub mod common;
+pub mod map;
 
 pub use map::HeaderMap;
-
 
 /// Valid header name characters for HTTP/2.0 and HTTP/3.0.
 ///
