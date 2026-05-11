@@ -524,7 +524,7 @@ fn map_get(c: &mut Criterion) {
                     .unwrap();
                 map
             },
-            |map| {
+            |mut map| {
                 black_box(map.get(&static_headers::HOST_KEY).unwrap());
                 black_box(map.get(&static_headers::ACCEPT_KEY).unwrap());
                 black_box(map.get(&static_headers::COOKIE_KEY).unwrap());
@@ -614,7 +614,7 @@ fn map_get_all(c: &mut Criterion) {
                     .unwrap();
                 map
             },
-            |map| {
+            |mut map| {
                 let _ = map.get_all(black_box(&static_headers::HOST_KEY));
                 let _ = map.get_all(black_box(&static_headers::ACCEPT_KEY));
                 let _ = map.get_all(black_box(&static_headers::COOKIE_KEY));

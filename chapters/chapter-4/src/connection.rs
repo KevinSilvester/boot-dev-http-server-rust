@@ -46,7 +46,8 @@ pub async fn handle_connections(listener: TcpListener, config: ServerConfig) -> 
             }
 
             let time = request_timer.elapsed();
-            println!("Request parsed: {:#?}", req_parser.request_line);
+            println!("RequestLine: {:#?}", req_parser.request_line);
+            println!("HeaderMap: {:#?}", req_parser.headers);
             println!("Request parsing took: {} us", time.as_micros());
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 29\r\nContent-Type: text/plain\r\n\r\nActix ain't got shit on me!!!")

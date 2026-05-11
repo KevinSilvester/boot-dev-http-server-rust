@@ -1,9 +1,9 @@
 use anyhow::Context;
 use bytes::{Bytes, BytesMut};
-use http::request::Parts;
 use thiserror::Error;
 
 use super::line::{HttpVersion, RequestLine, RequestMethod};
+use crate::header::HeaderMap;
 
 /// The request line is composed of 3 sections (excluding the \r\n new-line delimiter).
 /// 1. The method (e.g. GET, POST, etc.)
@@ -82,6 +82,7 @@ pub struct RequestParser {
     state: RequestParserState,
     max_body_size: usize,
     pub request_line: Option<RequestLine>,
+    pub headers: HeaderMap,
 }
 
 impl RequestParser {
@@ -90,6 +91,7 @@ impl RequestParser {
             state: RequestParserState::RequestLine,
             max_body_size,
             request_line: None,
+            headers: HeaderMap::new(),
         }
     }
 
@@ -160,13 +162,14 @@ impl RequestParser {
         })
     }
 
-    fn line_end_pos(&self, buf: &[u8], max_size: usize, min_size: usize) -> anyhow::Result<usize> {
-        let lf = match memchr::memchr(b'\n', buf) {
-            Some(nl) => nl,
-            None => return Ok(0),
-        };
-
-        if lf > max_size - 1 {
+    fn check_line(
+        &self,
+        buf: &[u8],
+        nl: usize,
+        max_size: usize,
+        min_size: usize,
+    ) -> anyhow::Result<usize> {
+        if nl > max_size - 1 {
             Err(match self.state {
                 RequestParserState::RequestLine => RequestParserError::RequestLineTooLong,
                 RequestParserState::Headers => RequestParserError::HeaderLineTooLong,
@@ -174,7 +177,7 @@ impl RequestParser {
             })?
         }
 
-        if lf < min_size - 1 {
+        if nl < min_size - 1 {
             Err(match self.state {
                 RequestParserState::RequestLine => RequestParserError::MalformedRequestLine,
                 RequestParserState::Headers => RequestParserError::MalformedHeaderLine,
@@ -182,27 +185,23 @@ impl RequestParser {
             })?
         }
 
-        if lf == 0 || buf[lf - 1] != b'\r' {
+        if nl == 0 || buf[nl - 1] != b'\r' {
             return Err(RequestParserError::InvalidLineEnding)?;
         }
 
-        Ok(lf)
+        Ok(nl)
     }
 
     pub fn parse(&mut self, buf: &[u8]) -> anyhow::Result<usize> {
         let mut read = 0;
 
-        loop {
+        while let Some(line_end) = memchr::memchr_iter(b'\n', buf).next() {
             match self.state {
                 RequestParserState::RequestLine => {
-                    let line_end =
-                        self.line_end_pos(buf, MAX_REQUEST_LINE_SIZE, MIN_REQUEST_LINE_SIZE)?;
-                    if line_end == 0 {
-                        break;
-                    }
-                    read += line_end;
+                    self.check_line(buf, line_end, MAX_REQUEST_LINE_SIZE, MIN_REQUEST_LINE_SIZE)?;
                     self.request_line = Some(Self::parse_request_line(&buf[..line_end - 1])?);
                     self.state = RequestParserState::Headers;
+                    read += line_end;
                 }
                 RequestParserState::Headers => {
                     self.state = RequestParserState::Body;
@@ -360,8 +359,7 @@ mod tests {
 
     #[test]
     fn parse_request_line_too_long() {
-        let mut req_parser = RequestParser::new(1024);
-        let r = req_parser.parse(&BAD_REQUEST_LINE_TOO_LONG);
+        let r = RequestParser::parse_request_line(&BAD_REQUEST_LINE_TOO_LONG);
         assert!(r.is_err());
         assert!(matches!(
             r.err().unwrap().downcast_ref::<RequestParserError>(),

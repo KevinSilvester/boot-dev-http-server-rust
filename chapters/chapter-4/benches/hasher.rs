@@ -55,12 +55,12 @@ fn hash_compare(c: &mut Criterion) {
     // let data = *b"accept-encoding";
     let data = *b"accept-encoding";
 
-    // c.bench_function("fnv_hash", |b| b.iter(|| hash_with_fnv(black_box(&data))));
+    c.bench_function("fnv_hash", |b| b.iter(|| hash_with_fnv(black_box(&data))));
     c.bench_function("rapid_hash", |b| b.iter(|| rapidhash_v3(&data)));
     c.bench_function("gxhash_hash", |b| b.iter(|| hash_with_gxhash(&data)));
-    // c.bench_function("default_hash", |b| {
-    //     b.iter(|| hash_with_default(black_box(&data)))
-    // });
+    c.bench_function("default_hash", |b| {
+        b.iter(|| hash_with_default(black_box(&data)))
+    });
 }
 
 const WARMUP: Duration = Duration::from_millis(1000);

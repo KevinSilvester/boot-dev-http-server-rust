@@ -53,7 +53,7 @@ const INITIAL_CAPACITY: usize = 16;
 /// Probably not the best way to go about doing this, but it works 🤷
 const POS_HASH_EMPTY: HashSize = 0;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct Pos {
     /// The hash of the header name, used for quick comparisons during lookups and insertions.
     hash: HashSize,
@@ -67,7 +67,7 @@ struct Pos {
 }
 
 impl Pos {
-    #[inline]
+    #[inline(always)]
     pub fn new(hash: HashSize, entry_idx: IndexSize, ideal_pos: IndexSize) -> Self {
         Self {
             hash,
@@ -75,7 +75,7 @@ impl Pos {
             ideal_pos,
         }
     }
-    #[inline]
+    #[inline(always)]
     pub fn empty() -> Self {
         Self {
             hash: POS_HASH_EMPTY,
@@ -84,7 +84,7 @@ impl Pos {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn is_empty(&self) -> bool {
         self.hash == POS_HASH_EMPTY
     }
@@ -174,6 +174,7 @@ pub struct MapIter<'a> {
 }
 
 impl<'a> MapIter<'a> {
+    #[inline(always)]
     pub fn new(map: &'a HeaderMap) -> Self {
         Self {
             map,
@@ -208,18 +209,17 @@ impl<'a> Iterator for MapIter<'a> {
         let pos = &self.map.indices[self.index];
         let bucket = &self.map.entries[pos.entry_idx as usize];
 
-        self.value_iter = Some(ValueIter::new(
+        let mut value_iter = ValueIter::new(
             self.map,
             Some(&bucket.value),
             bucket.overflow.as_ref().map(|link| link.head),
-        ));
+        );
+        let next_value = value_iter.next();
+
+        self.value_iter = Some(value_iter);
         self.indices_left -= 1;
 
-        self.value_iter
-            .as_mut()
-            .unwrap()
-            .next()
-            .map(|value| (bucket.key.as_ref(), value))
+        next_value.map(|value| (bucket.key.as_ref(), value))
     }
 }
 
@@ -252,36 +252,36 @@ pub struct HeaderMap {
 impl HeaderMap {
     pub const MAX_SIZE: usize = (MAX_CAPACITY as f32 * LOAD_FACTOR_THRESHOLD) as usize + 1;
 
-    #[inline]
+    #[inline(always)]
     pub fn new() -> Self {
         Self {
-            mask: (INITIAL_CAPACITY - 1) as u16,
+            mask: 0,
             size: 0,
-            capactiy: INITIAL_CAPACITY,
+            capactiy: 0,
             values_count: 0,
-            indices: vec![Pos::empty(); INITIAL_CAPACITY].into_boxed_slice(),
+            indices: Box::new([]),
             entries: vec![],
             extra_values: vec![],
             vacant_entries: smallvec![],
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn load_factor(&self) -> f32 {
         self.size as f32 / self.capactiy as f32
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn len(&self) -> usize {
         self.size
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn capacity(&self) -> usize {
         self.capactiy
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn values_count(&self) -> usize {
         self.values_count
     }
@@ -583,7 +583,7 @@ impl HeaderMap {
         // apply the initial values and capacity to the vectors
         if self.capactiy == 0 {
             self.capactiy = INITIAL_CAPACITY;
-            self.indices = vec![Pos::empty(); INITIAL_CAPACITY].into_boxed_slice();
+            self.indices = Box::new([Pos::empty(); INITIAL_CAPACITY]);
             self.mask = (INITIAL_CAPACITY - 1) as u16;
             return Ok(());
         }
@@ -607,16 +607,9 @@ impl HeaderMap {
         self.mask = (new_cap - 1) as u16;
         let mut new_indices = vec![Pos::empty(); new_cap].into_boxed_slice();
 
-        let mut idx = 0;
-
-        loop {
-            if idx >= self.indices.len() {
-                break;
-            }
-
+        for idx in 0..self.indices.len() {
             let pos = &self.indices[idx];
             if pos.is_empty() {
-                idx += 1;
                 continue;
             }
 
@@ -629,8 +622,6 @@ impl HeaderMap {
 
             mem::swap(&mut new_indices[probe], &mut self.indices[idx]);
             new_indices[probe].ideal_pos = ideal_pos as IndexSize;
-
-            idx += 1;
         }
 
         self.indices = new_indices;
